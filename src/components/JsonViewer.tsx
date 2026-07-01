@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef } from "react";
 import { FixedSizeList, type ListOnItemsRenderedProps } from "react-window";
 import type { Messages } from "../core/i18n";
 import type { JsonNode } from "../core/types";
@@ -25,6 +26,16 @@ export function JsonViewer({
   onVisibleRangeChange
 }: JsonViewerProps) {
   const height = Math.max(240, Math.min(620, window.innerHeight - 330));
+  const listRef = useRef<FixedSizeList | null>(null);
+  const activeMatchIndex = useMemo(
+    () => visibleNodes.findIndex((node) => node.id === activeMatchId),
+    [activeMatchId, visibleNodes]
+  );
+
+  useEffect(() => {
+    if (activeMatchIndex < 0) return;
+    listRef.current?.scrollToItem(activeMatchIndex, "center");
+  }, [activeMatchIndex]);
 
   const handleItemsRendered = ({ visibleStartIndex, visibleStopIndex }: ListOnItemsRenderedProps) => {
     onVisibleRangeChange(visibleStartIndex, visibleStopIndex);
@@ -37,6 +48,7 @@ export function JsonViewer({
   return (
     <div className="viewer">
       <FixedSizeList
+        ref={listRef}
         height={height}
         itemCount={visibleNodes.length}
         itemSize={ROW_HEIGHT}
