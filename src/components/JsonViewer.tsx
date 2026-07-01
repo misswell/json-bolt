@@ -10,6 +10,7 @@ interface JsonViewerProps {
   expandedIds: Set<number>;
   matchedIds: Set<number>;
   activeMatchId: number | null;
+  searchScrollTargetId: number | null;
   searchScrollSignal: number;
   onToggle: (id: number) => void;
   onVisibleRangeChange: (startIndex: number, stopIndex: number) => void;
@@ -23,21 +24,22 @@ export function JsonViewer({
   expandedIds,
   matchedIds,
   activeMatchId,
+  searchScrollTargetId,
   searchScrollSignal,
   onToggle,
   onVisibleRangeChange
 }: JsonViewerProps) {
   const height = Math.max(240, Math.min(620, window.innerHeight - 330));
   const listRef = useRef<FixedSizeList | null>(null);
-  const activeMatchIndex = useMemo(
-    () => visibleNodes.findIndex((node) => node.id === activeMatchId),
-    [activeMatchId, visibleNodes]
+  const scrollTargetIndex = useMemo(
+    () => visibleNodes.findIndex((node) => node.id === searchScrollTargetId),
+    [searchScrollTargetId, visibleNodes]
   );
 
   useEffect(() => {
-    if (activeMatchIndex < 0) return;
-    listRef.current?.scrollToItem(activeMatchIndex, "center");
-  }, [activeMatchId, activeMatchIndex, searchScrollSignal, visibleNodes.length]);
+    if (scrollTargetIndex < 0) return;
+    listRef.current?.scrollToItem(scrollTargetIndex, "center");
+  }, [searchScrollTargetId, scrollTargetIndex, searchScrollSignal, visibleNodes]);
 
   const handleItemsRendered = ({ visibleStartIndex, visibleStopIndex }: ListOnItemsRenderedProps) => {
     onVisibleRangeChange(visibleStartIndex, visibleStopIndex);

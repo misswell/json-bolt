@@ -45,6 +45,7 @@ export function App({ surface }: AppProps) {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [workerMatches, setWorkerMatches] = useState<SearchMatch[]>([]);
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const [searchScrollTargetId, setSearchScrollTargetId] = useState<number | null>(null);
   const [searchScrollSignal, setSearchScrollSignal] = useState(0);
   const [visibleRange, setVisibleRange] = useState({ start: 0, stop: 0 });
   const [expandLevel, setExpandLevel] = useState(2);
@@ -228,22 +229,27 @@ export function App({ surface }: AppProps) {
 
   useEffect(() => {
     setActiveMatchIndex(0);
-    const targetId = matches[0]?.nodeId;
+  }, [debouncedQuery]);
+
+  useEffect(() => {
+    if (matches.length === 0) {
+      setSearchScrollTargetId(null);
+      return;
+    }
+
+    const nextIndex = Math.min(activeMatchIndex, matches.length - 1);
+    if (nextIndex !== activeMatchIndex) {
+      setActiveMatchIndex(nextIndex);
+      return;
+    }
+
+    const targetId = matches[nextIndex]?.nodeId;
     if (targetId === undefined) return;
+
+    revealNode(targetId);
+    setSearchScrollTargetId(targetId);
     setSearchScrollSignal((current) => current + 1);
-
-    setExpandedIds((current) => {
-      const next = new Set(current);
-      let node = nodesById.get(targetId);
-
-      while (node?.parentId !== null && node?.parentId !== undefined) {
-        next.add(node.parentId);
-        node = nodesById.get(node.parentId);
-      }
-
-      return next;
-    });
-  }, [matches, nodesById]);
+  }, [activeMatchIndex, matches, nodesById]);
 
   useEffect(() => {
     if (pendingExpandLevel === null) return;
@@ -591,8 +597,11 @@ export function App({ surface }: AppProps) {
     setActiveMatchIndex((current) => {
       const next = (current + direction + matches.length) % matches.length;
       const targetId = matches[next]?.nodeId;
-      if (targetId !== undefined) revealNode(targetId);
-      setSearchScrollSignal((signal) => signal + 1);
+      if (targetId !== undefined) {
+        revealNode(targetId);
+        setSearchScrollTargetId(targetId);
+        setSearchScrollSignal((signal) => signal + 1);
+      }
       return next;
     });
   };
@@ -600,14 +609,18 @@ export function App({ surface }: AppProps) {
   const revealNode = (id: number) => {
     setExpandedIds((current) => {
       const next = new Set(current);
+      let changed = false;
       let node = nodesById.get(id);
 
       while (node?.parentId !== null && node?.parentId !== undefined) {
-        next.add(node.parentId);
+        if (!next.has(node.parentId)) {
+          next.add(node.parentId);
+          changed = true;
+        }
         node = nodesById.get(node.parentId);
       }
 
-      return next;
+      return changed ? next : current;
     });
   };
 
@@ -708,6 +721,7 @@ export function App({ surface }: AppProps) {
             expandedIds={expandedIds}
             matchedIds={matchedIds}
             activeMatchId={activeMatchId}
+            searchScrollTargetId={searchScrollTargetId}
             searchScrollSignal={searchScrollSignal}
             onToggle={toggleNode}
             onVisibleRangeChange={(start, stop) => setVisibleRange({ start, stop })}
