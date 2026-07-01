@@ -175,6 +175,7 @@ function readNode(start: number, key: string | null, parentId: number | null, de
     type,
     depth,
     valuePreview: createPreview(valueStart, valueEnd, type),
+    searchableText: createSearchableText(valueStart, valueEnd, type),
     valueStart,
     valueEnd,
     childCount
@@ -390,6 +391,18 @@ function createPreview(start: number, end: number, type: JsonNodeType): string {
   return end - start > PREVIEW_LIMIT ? `${raw}...` : raw;
 }
 
+function createSearchableText(start: number, end: number, type: JsonNodeType): string {
+  if (type === "object") return "{}";
+  if (type === "array") return "[]";
+
+  const raw = sourceText.slice(start, end);
+  if (type === "string") {
+    return safeJsonParse(raw, raw);
+  }
+
+  return raw;
+}
+
 function skipWhitespace(start: number): number {
   let index = start;
   while (/\s/.test(sourceText[index] ?? "")) index += 1;
@@ -523,6 +536,7 @@ async function createStreamNode(
     type: info.type,
     depth,
     valuePreview: await createStreamPreview(blob, info),
+    searchableText: await createStreamSearchableText(blob, info),
     valueStart: info.start,
     valueEnd: info.end,
     childCount: info.childCount
@@ -535,6 +549,18 @@ async function createStreamPreview(blob: Blob, info: StreamValueInfo): Promise<s
 
   const raw = await decodeBlobRange(blob, info.start, Math.min(info.end, info.start + PREVIEW_LIMIT));
   return info.end - info.start > PREVIEW_LIMIT ? `${raw}...` : raw;
+}
+
+async function createStreamSearchableText(blob: Blob, info: StreamValueInfo): Promise<string> {
+  if (info.type === "object") return "{}";
+  if (info.type === "array") return "[]";
+
+  const raw = await decodeBlobRange(blob, info.start, Math.min(info.end, info.start + PREVIEW_LIMIT));
+  if (info.type === "string") {
+    return safeJsonParse(raw, raw);
+  }
+
+  return raw;
 }
 
 async function decodeBlobRange(blob: Blob, start: number, end: number): Promise<string> {

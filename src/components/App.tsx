@@ -192,7 +192,21 @@ export function App({ surface }: AppProps) {
 
   useEffect(() => {
     setActiveMatchIndex(0);
-  }, [debouncedQuery]);
+    const targetId = matches[0]?.nodeId;
+    if (targetId === undefined) return;
+
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      let node = nodesById.get(targetId);
+
+      while (node?.parentId !== null && node?.parentId !== undefined) {
+        next.add(node.parentId);
+        node = nodesById.get(node.parentId);
+      }
+
+      return next;
+    });
+  }, [matches, nodesById]);
 
   function getSource() {
     return sourceTextRef.current;

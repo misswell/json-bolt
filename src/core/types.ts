@@ -13,6 +13,7 @@ export interface JsonNode {
   type: JsonNodeType;
   depth: number;
   valuePreview: string;
+  searchableText?: string;
   valueStart?: number;
   valueEnd?: number;
   children?: number[];

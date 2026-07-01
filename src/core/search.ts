@@ -8,7 +8,7 @@ export function searchNodes(nodes: JsonNode[], query: string): SearchMatch[] {
 
   for (const node of nodes) {
     const key = node.key?.toLocaleLowerCase() ?? "";
-    const value = node.valuePreview.toLocaleLowerCase();
+    const value = (node.searchableText ?? node.valuePreview).toLocaleLowerCase();
     if (key.includes(normalized) || value.includes(normalized)) {
       matches.push({ nodeId: node.id });
     }

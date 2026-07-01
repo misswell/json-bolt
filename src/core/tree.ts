@@ -47,6 +47,7 @@ export function flattenJson(value: unknown): ParseResult {
       type,
       depth,
       valuePreview: createPreview(currentValue, type),
+      searchableText: createSearchableText(currentValue, type),
       childCount: 0
     };
 
@@ -72,6 +73,13 @@ export function flattenJson(value: unknown): ParseResult {
 
   const rootId = addNode(value, null, null, 0);
   return { nodes, rootIds: [rootId] };
+}
+
+function createSearchableText(value: unknown, type = jsonTypeOf(value)): string {
+  if (type === "object") return "{}";
+  if (type === "array") return "[]";
+  if (type === "string") return String(value);
+  return String(value);
 }
 
 export function buildVisibleNodes(
