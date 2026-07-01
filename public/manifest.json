@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "JsonBolt",
+  "version": "0.1.0",
+  "description": "A high-performance JSON viewer for Chrome.",
+  "permissions": ["sidePanel", "activeTab", "scripting", "storage", "clipboardRead", "clipboardWrite"],
+  "background": {
+    "service_worker": "background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "JsonBolt"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  }
+}

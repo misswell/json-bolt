@@ -1,0 +1,64 @@
+import { FixedSizeList, type ListOnItemsRenderedProps } from "react-window";
+import type { Messages } from "../core/i18n";
+import type { JsonNode } from "../core/types";
+import { JsonRow } from "./JsonRow";
+
+interface JsonViewerProps {
+  labels: Messages;
+  visibleNodes: JsonNode[];
+  expandedIds: Set<number>;
+  matchedIds: Set<number>;
+  activeMatchId: number | null;
+  onToggle: (id: number) => void;
+  onVisibleRangeChange: (startIndex: number, stopIndex: number) => void;
+}
+
+const ROW_HEIGHT = 28;
+
+export function JsonViewer({
+  labels,
+  visibleNodes,
+  expandedIds,
+  matchedIds,
+  activeMatchId,
+  onToggle,
+  onVisibleRangeChange
+}: JsonViewerProps) {
+  const height = Math.max(240, Math.min(620, window.innerHeight - 330));
+
+  const handleItemsRendered = ({ visibleStartIndex, visibleStopIndex }: ListOnItemsRenderedProps) => {
+    onVisibleRangeChange(visibleStartIndex, visibleStopIndex);
+  };
+
+  if (visibleNodes.length === 0) {
+    return <div className="empty-state">{labels.emptyState}</div>;
+  }
+
+  return (
+    <div className="viewer">
+      <FixedSizeList
+        height={height}
+        itemCount={visibleNodes.length}
+        itemSize={ROW_HEIGHT}
+        width="100%"
+        onItemsRendered={handleItemsRendered}
+      >
+        {({ index, style }) => {
+          const node = visibleNodes[index];
+          return (
+            <div style={style}>
+              <JsonRow
+                labels={labels}
+                node={node}
+                isExpanded={expandedIds.has(node.id)}
+                isMatched={matchedIds.has(node.id)}
+                isActiveMatch={activeMatchId === node.id}
+                onToggle={onToggle}
+              />
+            </div>
+          );
+        }}
+      </FixedSizeList>
+    </div>
+  );
+}
