@@ -45,6 +45,7 @@ export function App({ surface }: AppProps) {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [workerMatches, setWorkerMatches] = useState<SearchMatch[]>([]);
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const [searchScrollSignal, setSearchScrollSignal] = useState(0);
   const [visibleRange, setVisibleRange] = useState({ start: 0, stop: 0 });
   const [expandLevel, setExpandLevel] = useState(2);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -229,6 +230,7 @@ export function App({ surface }: AppProps) {
     setActiveMatchIndex(0);
     const targetId = matches[0]?.nodeId;
     if (targetId === undefined) return;
+    setSearchScrollSignal((current) => current + 1);
 
     setExpandedIds((current) => {
       const next = new Set(current);
@@ -590,6 +592,7 @@ export function App({ surface }: AppProps) {
       const next = (current + direction + matches.length) % matches.length;
       const targetId = matches[next]?.nodeId;
       if (targetId !== undefined) revealNode(targetId);
+      setSearchScrollSignal((signal) => signal + 1);
       return next;
     });
   };
@@ -705,6 +708,7 @@ export function App({ surface }: AppProps) {
             expandedIds={expandedIds}
             matchedIds={matchedIds}
             activeMatchId={activeMatchId}
+            searchScrollSignal={searchScrollSignal}
             onToggle={toggleNode}
             onVisibleRangeChange={(start, stop) => setVisibleRange({ start, stop })}
           />

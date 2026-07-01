@@ -10,6 +10,7 @@ interface JsonViewerProps {
   expandedIds: Set<number>;
   matchedIds: Set<number>;
   activeMatchId: number | null;
+  searchScrollSignal: number;
   onToggle: (id: number) => void;
   onVisibleRangeChange: (startIndex: number, stopIndex: number) => void;
 }
@@ -22,6 +23,7 @@ export function JsonViewer({
   expandedIds,
   matchedIds,
   activeMatchId,
+  searchScrollSignal,
   onToggle,
   onVisibleRangeChange
 }: JsonViewerProps) {
@@ -35,7 +37,7 @@ export function JsonViewer({
   useEffect(() => {
     if (activeMatchIndex < 0) return;
     listRef.current?.scrollToItem(activeMatchIndex, "center");
-  }, [activeMatchIndex]);
+  }, [activeMatchId, activeMatchIndex, searchScrollSignal, visibleNodes.length]);
 
   const handleItemsRendered = ({ visibleStartIndex, visibleStopIndex }: ListOnItemsRenderedProps) => {
     onVisibleRangeChange(visibleStartIndex, visibleStopIndex);
