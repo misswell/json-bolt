@@ -8,15 +8,7 @@ import { JsonViewer } from "./JsonViewer";
 import { SearchBox } from "./SearchBox";
 import { Toolbar } from "./Toolbar";
 
-const SAMPLE_JSON = JSON.stringify(
-  {
-    name: "JsonBolt",
-    features: ["worker parsing", "virtual tree", "search", "format", "minify"],
-    ready: true
-  },
-  null,
-  2
-);
+const INITIAL_SOURCE = "";
 const TEXTAREA_PREVIEW_MAX_CHARS = 200_000;
 const LARGE_SOURCE_CHARS = 1_000_000;
 const AUTO_PARSE_DELAY_MS = 650;
@@ -29,14 +21,14 @@ export function App({ surface }: AppProps) {
   const labels = useMemo(() => getMessages(), []);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const sourceTextRef = useRef(SAMPLE_JSON);
+  const sourceTextRef = useRef(INITIAL_SOURCE);
   const sourceBlobRef = useRef<Blob | null>(null);
   const autoParseTimerRef = useRef<number | null>(null);
   const latestRequestIdRef = useRef(0);
   const dragDepthRef = useRef(0);
   const [sourceInfo, setSourceInfo] = useState({
-    hasText: SAMPLE_JSON.length > 0,
-    sizeLabel: formatBytes(new Blob([SAMPLE_JSON]).size)
+    hasText: INITIAL_SOURCE.length > 0,
+    sizeLabel: formatBytes(new Blob([INITIAL_SOURCE]).size)
   });
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [nodes, setNodes] = useState<JsonNode[]>([]);
@@ -555,7 +547,7 @@ export function App({ surface }: AppProps) {
       >
         <textarea
           ref={inputRef}
-          defaultValue={SAMPLE_JSON}
+          defaultValue={INITIAL_SOURCE}
           onInput={(event) => {
             const text = event.currentTarget.value;
             sourceTextRef.current = text;
