@@ -12,6 +12,7 @@ const INITIAL_SOURCE = "";
 const TEXTAREA_PREVIEW_MAX_CHARS = 200_000;
 const LARGE_SOURCE_CHARS = 1_000_000;
 const AUTO_PARSE_DELAY_MS = 650;
+const MAX_EXPANSION_REQUESTS_PER_BATCH = 32;
 
 interface AppProps {
   surface: "page" | "sidepanel";
@@ -210,6 +211,9 @@ export function App({ surface }: AppProps) {
   useEffect(() => {
     debouncedQueryRef.current = debouncedQuery;
     setWorkerMatches([]);
+    if (debouncedQuery.trim()) {
+      setPendingExpandLevel(null);
+    }
 
     if (!debouncedQuery.trim() || !workerRef.current) return;
 
@@ -556,10 +560,17 @@ export function App({ surface }: AppProps) {
   };
 
   const requestUnloadedNodesToLevel = (level: number): boolean => {
+    if (debouncedQueryRef.current.trim()) {
+      return false;
+    }
+
     let requested = false;
+    let requestCount = 0;
     for (const node of nodes) {
+      if (requestCount >= MAX_EXPANSION_REQUESTS_PER_BATCH) break;
       if (node.depth < level && requestNodeExpansion(node)) {
         requested = true;
+        requestCount += 1;
       }
     }
     if (requested) {
