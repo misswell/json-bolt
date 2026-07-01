@@ -25,6 +25,7 @@ export function App({ surface }: AppProps) {
   const sourceBlobRef = useRef<Blob | null>(null);
   const autoParseTimerRef = useRef<number | null>(null);
   const latestRequestIdRef = useRef(0);
+  const debouncedQueryRef = useRef("");
   const dragDepthRef = useRef(0);
   const [sourceInfo, setSourceInfo] = useState({
     hasText: INITIAL_SOURCE.length > 0,
@@ -40,6 +41,7 @@ export function App({ surface }: AppProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [workerMatches, setWorkerMatches] = useState<SearchMatch[]>([]);
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [visibleRange, setVisibleRange] = useState({ start: 0, stop: 0 });
   const [expandLevel, setExpandLevel] = useState(2);
@@ -78,7 +80,15 @@ export function App({ surface }: AppProps) {
         setNodes([]);
         setRootIds([]);
         setExpandedIds(new Set());
+        setWorkerMatches([]);
         setActiveMatchIndex(0);
+        return;
+      }
+
+      if (response.type === "search") {
+        if (response.query.trim() === debouncedQueryRef.current.trim()) {
+          setWorkerMatches(response.matches);
+        }
         return;
       }
 
@@ -105,6 +115,7 @@ export function App({ surface }: AppProps) {
       setNodes(response.nodes);
       setRootIds(response.rootIds);
       setExpandedIds(new Set(response.rootIds));
+      setWorkerMatches([]);
       setProgress(0);
       setActiveMatchIndex(0);
     };
@@ -183,12 +194,27 @@ export function App({ surface }: AppProps) {
     () => buildVisibleNodes(rootIds, nodesById, expandedIds),
     [rootIds, nodesById, expandedIds]
   );
-  const matches = useMemo<SearchMatch[]>(
+  const localMatches = useMemo<SearchMatch[]>(
     () => searchNodes(nodes, debouncedQuery),
     [nodes, debouncedQuery]
   );
+  const matches = useMemo<SearchMatch[]>(() => mergeMatches(localMatches, workerMatches), [localMatches, workerMatches]);
   const matchedIds = useMemo(() => new Set(matches.map((match) => match.nodeId)), [matches]);
   const activeMatchId = matches[activeMatchIndex]?.nodeId ?? null;
+
+  useEffect(() => {
+    debouncedQueryRef.current = debouncedQuery;
+    setWorkerMatches([]);
+
+    if (!debouncedQuery.trim() || !workerRef.current) return;
+
+    workerRef.current.postMessage({
+      type: "search",
+      requestId: latestRequestIdRef.current,
+      query: debouncedQuery,
+      limit: 500
+    });
+  }, [debouncedQuery, nodes.length]);
 
   useEffect(() => {
     setActiveMatchIndex(0);
@@ -262,6 +288,7 @@ export function App({ surface }: AppProps) {
     setIsParsing(true);
     setProgress(0);
     setError(null);
+    setWorkerMatches([]);
     setNotice(source.length > LARGE_SOURCE_CHARS ? labels.parsingLarge : null);
 
     if (source.length > LARGE_SOURCE_CHARS) {
@@ -283,6 +310,7 @@ export function App({ surface }: AppProps) {
     setIsParsing(true);
     setProgress(0);
     setError(null);
+    setWorkerMatches([]);
     setNotice(labels.parsingLarge);
     workerRef.current.postMessage({ type: "parse", blob, requestId });
   }
@@ -353,6 +381,7 @@ export function App({ surface }: AppProps) {
       setNodes([]);
       setRootIds([]);
       setExpandedIds(new Set());
+      setWorkerMatches([]);
 
       setError(null);
       setNotice(labels.fileLoaded(file.name));
@@ -545,6 +574,7 @@ export function App({ surface }: AppProps) {
           setNodes([]);
           setRootIds([]);
           setExpandedIds(new Set());
+          setWorkerMatches([]);
           setError(null);
           setNotice(null);
         }}
@@ -614,6 +644,19 @@ export function App({ surface }: AppProps) {
 
 function hasDroppableContent(dataTransfer: DataTransfer): boolean {
   return dataTransfer.types.includes("Files") || dataTransfer.types.includes("text/plain");
+}
+
+function mergeMatches(primary: SearchMatch[], secondary: SearchMatch[]): SearchMatch[] {
+  const seen = new Set<number>();
+  const merged: SearchMatch[] = [];
+
+  for (const match of [...primary, ...secondary]) {
+    if (seen.has(match.nodeId)) continue;
+    seen.add(match.nodeId);
+    merged.push(match);
+  }
+
+  return merged;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

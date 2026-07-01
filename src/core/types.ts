@@ -38,6 +38,12 @@ export type ParserRequest =
       nodeId: number;
       valueStart: number;
       depth: number;
+    }
+  | {
+      type: "search";
+      requestId: number;
+      query: string;
+      limit: number;
     };
 
 export type ParserStage = "reading" | "parsing" | "building" | "done";
@@ -62,6 +68,12 @@ export type ParserResponse =
       nodeId: number;
       children: JsonNode[];
       childIds: number[];
+    }
+  | {
+      type: "search";
+      requestId: number;
+      query: string;
+      matches: SearchMatch[];
     }
   | {
       type: "error";

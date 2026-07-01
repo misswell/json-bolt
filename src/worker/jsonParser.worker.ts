@@ -7,6 +7,7 @@ const STREAM_PARSE_THRESHOLD_BYTES = 450 * 1024 * 1024;
 let sourceText = "";
 let currentBlob: Blob | null = null;
 let nextNodeId = 0;
+let indexedNodes: JsonNode[] = [];
 
 ctx.onmessage = async (event: MessageEvent<ParserRequest>) => {
   const message = event.data;
@@ -18,6 +19,11 @@ ctx.onmessage = async (event: MessageEvent<ParserRequest>) => {
 
   if (message.type === "expand") {
     handleExpand(message);
+    return;
+  }
+
+  if (message.type === "search") {
+    void handleSearch(message);
   }
 };
 
@@ -34,6 +40,7 @@ async function handleParse(message: Extract<ParserRequest, { type: "parse" }>): 
     currentBlob = message.blob ?? null;
     sourceText = message.blob ? await message.blob.text() : message.text ?? "";
     nextNodeId = 0;
+    indexedNodes = [];
 
     const total = sourceText.length || 1;
     postResponse({ type: "progress", requestId, stage: "parsing", parsed: 0, total });
@@ -50,13 +57,15 @@ async function handleParse(message: Extract<ParserRequest, { type: "parse" }>): 
     if (root.childCount > 0 && root.valueStart !== undefined) {
       const expanded = readChildren(root);
       root.children = expanded.childIds;
+      indexedNodes = [root, ...expanded.children];
       postResponse({
         type: "success",
         requestId,
-        nodes: [root, ...expanded.children],
+        nodes: indexedNodes,
         rootIds: [root.id]
       });
     } else {
+      indexedNodes = [root];
       postResponse({ type: "success", requestId, nodes: [root], rootIds: [root.id] });
     }
 
@@ -84,6 +93,7 @@ function handleExpand(message: Extract<ParserRequest, { type: "expand" }>): void
     const shell = readNode(message.valueStart, null, null, message.depth);
     shell.id = message.nodeId;
     const expanded = readChildren(shell);
+    mergeIndexedNodes([{ ...shell, children: expanded.childIds }, ...expanded.children]);
     postResponse({
       type: "expanded",
       requestId: message.requestId,
@@ -109,6 +119,7 @@ async function handleStreamParse(blob: Blob, requestId: number): Promise<void> {
   sourceText = "";
   currentBlob = blob;
   nextNodeId = 0;
+  indexedNodes = [];
 
   try {
     const scanner = new BlobScanner(blob, requestId);
@@ -131,10 +142,12 @@ async function handleStreamParse(blob: Blob, requestId: number): Promise<void> {
     if (root.childCount > 0) {
       const expanded = await readStreamChildren(root, requestId);
       root.children = expanded.childIds;
-      postResponse({ type: "success", requestId, nodes: [root, ...expanded.children], rootIds: [root.id] });
+      indexedNodes = [root, ...expanded.children];
+      postResponse({ type: "success", requestId, nodes: indexedNodes, rootIds: [root.id] });
       return;
     }
 
+    indexedNodes = [root];
     postResponse({ type: "success", requestId, nodes: [root], rootIds: [root.id] });
   } catch (error) {
     postStreamError(error, requestId);
@@ -150,6 +163,7 @@ async function handleStreamExpand(message: Extract<ParserRequest, { type: "expan
     const shell = await createStreamNode(info, null, null, message.depth, currentBlob);
     shell.id = message.nodeId;
     const expanded = await readStreamChildren(shell, message.requestId);
+    mergeIndexedNodes([{ ...shell, children: expanded.childIds }, ...expanded.children]);
     postResponse({
       type: "expanded",
       requestId: message.requestId,
@@ -160,6 +174,36 @@ async function handleStreamExpand(message: Extract<ParserRequest, { type: "expan
   } catch (error) {
     postStreamError(error, message.requestId);
   }
+}
+
+async function handleSearch(message: Extract<ParserRequest, { type: "search" }>): Promise<void> {
+  const query = message.query.trim();
+  if (!query) {
+    postResponse({ type: "search", requestId: message.requestId, query: message.query, matches: [] });
+    return;
+  }
+
+  if (sourceText) {
+    postResponse({
+      type: "search",
+      requestId: message.requestId,
+      query: message.query,
+      matches: searchInText(sourceText, query, message.limit)
+    });
+    return;
+  }
+
+  if (currentBlob) {
+    postResponse({
+      type: "search",
+      requestId: message.requestId,
+      query: message.query,
+      matches: await searchInBlob(currentBlob, query, message.limit)
+    });
+    return;
+  }
+
+  postResponse({ type: "search", requestId: message.requestId, query: message.query, matches: [] });
 }
 
 function readNode(start: number, key: string | null, parentId: number | null, depth: number): JsonNode {
@@ -427,6 +471,82 @@ function safeJsonParse<T>(text: string, fallback: T): string | T {
   } catch {
     return fallback;
   }
+}
+
+function searchInText(text: string, query: string, limit: number): { nodeId: number }[] {
+  const normalizedText = text.toLocaleLowerCase();
+  const normalizedQuery = query.toLocaleLowerCase();
+  const results: { nodeId: number }[] = [];
+  const seen = new Set<number>();
+  let index = normalizedText.indexOf(normalizedQuery);
+
+  while (index >= 0 && results.length < limit) {
+    const node = findDeepestIndexedNode(index);
+    if (node && !seen.has(node.id)) {
+      seen.add(node.id);
+      results.push({ nodeId: node.id });
+    }
+    index = normalizedText.indexOf(normalizedQuery, index + Math.max(1, normalizedQuery.length));
+  }
+
+  return results;
+}
+
+async function searchInBlob(blob: Blob, query: string, limit: number): Promise<{ nodeId: number }[]> {
+  const normalizedQuery = query.toLocaleLowerCase();
+  const decoder = new TextDecoder();
+  const reader = blob.stream().getReader();
+  const results: { nodeId: number }[] = [];
+  const seen = new Set<number>();
+  let scanned = 0;
+  let carry = "";
+  let done = false;
+
+  while (!done && results.length < limit) {
+    const next = await reader.read();
+    done = next.done;
+    const chunk = next.value ? decoder.decode(next.value, { stream: !done }) : "";
+    const text = `${carry}${chunk}`;
+    const normalizedText = text.toLocaleLowerCase();
+    let index = normalizedText.indexOf(normalizedQuery);
+
+    while (index >= 0 && results.length < limit) {
+      const position = Math.max(0, scanned - carry.length + index);
+      const node = findDeepestIndexedNode(position);
+      if (node && !seen.has(node.id)) {
+        seen.add(node.id);
+        results.push({ nodeId: node.id });
+      }
+      index = normalizedText.indexOf(normalizedQuery, index + Math.max(1, normalizedQuery.length));
+    }
+
+    scanned += chunk.length;
+    carry = text.slice(-Math.max(normalizedQuery.length - 1, 0));
+  }
+
+  return results;
+}
+
+function findDeepestIndexedNode(position: number): JsonNode | null {
+  let best: JsonNode | null = null;
+
+  for (const node of indexedNodes) {
+    if (node.valueStart === undefined || node.valueEnd === undefined) continue;
+    if (position < node.valueStart || position >= node.valueEnd) continue;
+    if (!best || node.depth > best.depth) {
+      best = node;
+    }
+  }
+
+  return best;
+}
+
+function mergeIndexedNodes(nodes: JsonNode[]): void {
+  const byId = new Map(indexedNodes.map((node) => [node.id, node]));
+  for (const node of nodes) {
+    byId.set(node.id, node);
+  }
+  indexedNodes = Array.from(byId.values());
 }
 
 interface StreamValueInfo {
