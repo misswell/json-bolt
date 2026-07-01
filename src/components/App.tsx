@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes, formatJson, minifyJson } from "../core/formatter";
 import { getMessages } from "../core/i18n";
-import { buildVisibleNodes, collectExpandableIds } from "../core/tree";
+import { buildVisibleNodes } from "../core/tree";
 import { searchNodes } from "../core/search";
 import type { JsonNode, ParserResponse, SearchMatch } from "../core/types";
 import { JsonViewer } from "./JsonViewer";
@@ -26,6 +26,7 @@ export function App({ surface }: AppProps) {
   const autoParseTimerRef = useRef<number | null>(null);
   const latestRequestIdRef = useRef(0);
   const debouncedQueryRef = useRef("");
+  const expandingNodeIdsRef = useRef<Set<number>>(new Set());
   const dragDepthRef = useRef(0);
   const [sourceInfo, setSourceInfo] = useState({
     hasText: INITIAL_SOURCE.length > 0,
@@ -46,6 +47,7 @@ export function App({ surface }: AppProps) {
   const [visibleRange, setVisibleRange] = useState({ start: 0, stop: 0 });
   const [expandLevel, setExpandLevel] = useState(2);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [pendingExpandLevel, setPendingExpandLevel] = useState<number | null>(null);
   const workerRef = useRef<Worker | null>(null);
 
   useEffect(() => {
@@ -67,6 +69,7 @@ export function App({ surface }: AppProps) {
       }
 
       if (response.type === "error") {
+        expandingNodeIdsRef.current.clear();
         setIsParsing(false);
         setProgress(0);
         setNotice(null);
@@ -93,6 +96,7 @@ export function App({ surface }: AppProps) {
       }
 
       if (response.type === "expanded") {
+        expandingNodeIdsRef.current.delete(response.nodeId);
         setNodes((current) => {
           const existingIds = new Set(current.map((node) => node.id));
           const next = current.map((node) =>
@@ -112,6 +116,7 @@ export function App({ surface }: AppProps) {
       setIsParsing(false);
       setError(null);
       setNotice(null);
+      expandingNodeIdsRef.current.clear();
       setNodes(response.nodes);
       setRootIds(response.rootIds);
       setExpandedIds(new Set(response.rootIds));
@@ -234,6 +239,17 @@ export function App({ surface }: AppProps) {
     });
   }, [matches, nodesById]);
 
+  useEffect(() => {
+    if (pendingExpandLevel === null) return;
+
+    const changed = expandLoadedNodesToLevel(pendingExpandLevel);
+    const requested = requestUnloadedNodesToLevel(pendingExpandLevel);
+
+    if (!changed && !requested) {
+      setPendingExpandLevel(null);
+    }
+  }, [nodes, pendingExpandLevel]);
+
   function getSource() {
     return sourceTextRef.current;
   }
@@ -289,6 +305,8 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
+    expandingNodeIdsRef.current.clear();
+    setPendingExpandLevel(null);
     setNotice(source.length > LARGE_SOURCE_CHARS ? labels.parsingLarge : null);
 
     if (source.length > LARGE_SOURCE_CHARS) {
@@ -311,6 +329,8 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
+    expandingNodeIdsRef.current.clear();
+    setPendingExpandLevel(null);
     setNotice(labels.parsingLarge);
     workerRef.current.postMessage({ type: "parse", blob, requestId });
   }
@@ -478,14 +498,7 @@ export function App({ surface }: AppProps) {
         return next;
       }
 
-      if (node.childCount > 0 && !node.children && node.valueStart !== undefined && workerRef.current) {
-        workerRef.current.postMessage({
-          type: "expand",
-          requestId: latestRequestIdRef.current,
-          nodeId: node.id,
-          valueStart: node.valueStart,
-          depth: node.depth
-        });
+      if (requestNodeExpansion(node)) {
         setNotice(labels.parseProgress(labels.parseStages.building, 0));
         return next;
       }
@@ -495,24 +508,70 @@ export function App({ surface }: AppProps) {
     });
   };
 
+  const requestNodeExpansion = (node: JsonNode): boolean => {
+    if (node.childCount <= 0 || node.children || node.valueStart === undefined || !workerRef.current) {
+      return false;
+    }
+    if (expandingNodeIdsRef.current.has(node.id)) {
+      return false;
+    }
+
+    expandingNodeIdsRef.current.add(node.id);
+    workerRef.current.postMessage({
+      type: "expand",
+      requestId: latestRequestIdRef.current,
+      nodeId: node.id,
+      valueStart: node.valueStart,
+      depth: node.depth
+    });
+    return true;
+  };
+
   const expandAll = () => {
-    const expandable = collectExpandableIds(nodes);
-    setExpandedIds(new Set(expandable));
+    const maxKnownDepth = nodes.reduce((maxDepth, node) => Math.max(maxDepth, node.depth), 0);
+    expandToLevel(Math.max(maxKnownDepth + 2, expandLevel));
   };
 
   const expandToLevel = (level: number) => {
     const normalized = Number.isFinite(level) ? Math.max(1, Math.floor(level)) : 1;
     setExpandLevel(normalized);
-    setExpandedIds(
-      new Set(
-        nodes
-          .filter((node) => node.childCount > 0 && node.depth < normalized)
-          .map((node) => node.id)
-      )
-    );
+    setPendingExpandLevel(normalized);
+    expandLoadedNodesToLevel(normalized);
+    requestUnloadedNodesToLevel(normalized);
   };
 
-  const collapseAll = () => setExpandedIds(new Set(rootIds));
+  const expandLoadedNodesToLevel = (level: number): boolean => {
+    let changed = false;
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      for (const node of nodes) {
+        if (node.childCount > 0 && node.depth < level && node.children && !next.has(node.id)) {
+          next.add(node.id);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    return changed;
+  };
+
+  const requestUnloadedNodesToLevel = (level: number): boolean => {
+    let requested = false;
+    for (const node of nodes) {
+      if (node.depth < level && requestNodeExpansion(node)) {
+        requested = true;
+      }
+    }
+    if (requested) {
+      setNotice(labels.parseProgress(labels.parseStages.building, 0));
+    }
+    return requested;
+  };
+
+  const collapseAll = () => {
+    setPendingExpandLevel(null);
+    setExpandedIds(new Set(rootIds));
+  };
 
   const goToMatch = (direction: 1 | -1) => {
     if (matches.length === 0) return;
@@ -575,6 +634,8 @@ export function App({ surface }: AppProps) {
           setRootIds([]);
           setExpandedIds(new Set());
           setWorkerMatches([]);
+          expandingNodeIdsRef.current.clear();
+          setPendingExpandLevel(null);
           setError(null);
           setNotice(null);
         }}
