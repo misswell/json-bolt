@@ -97,6 +97,7 @@ function handleExpand(message: Extract<ParserRequest, { type: "expand" }>): void
     postResponse({
       type: "expanded",
       requestId: message.requestId,
+      expandRequestId: message.expandRequestId,
       nodeId: message.nodeId,
       children: expanded.children,
       childIds: expanded.childIds
@@ -167,6 +168,7 @@ async function handleStreamExpand(message: Extract<ParserRequest, { type: "expan
     postResponse({
       type: "expanded",
       requestId: message.requestId,
+      expandRequestId: message.expandRequestId,
       nodeId: message.nodeId,
       children: expanded.children,
       childIds: expanded.childIds

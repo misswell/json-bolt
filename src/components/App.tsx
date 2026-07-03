@@ -12,7 +12,9 @@ const INITIAL_SOURCE = "";
 const TEXTAREA_PREVIEW_MAX_CHARS = 200_000;
 const LARGE_SOURCE_CHARS = 1_000_000;
 const AUTO_PARSE_DELAY_MS = 650;
-const MAX_EXPANSION_REQUESTS_PER_BATCH = 32;
+const MAX_CONCURRENT_EXPANSION_REQUESTS = 1;
+const MIN_EXPANSION_PROGRESS_MS = 450;
+const EXPANSION_NOTICE_DELAY_MS = 200;
 
 interface AppProps {
   surface: "page" | "sidepanel";
@@ -27,6 +29,15 @@ export function App({ surface }: AppProps) {
   const autoParseTimerRef = useRef<number | null>(null);
   const latestRequestIdRef = useRef(0);
   const debouncedQueryRef = useRef("");
+  const pendingSearchRevealRef = useRef<{ query: string; index: number } | null>(null);
+  const expansionNoticeActiveRef = useRef(false);
+  const expansionProgressSuppressedRef = useRef(false);
+  const expansionProgressStartedAtRef = useRef(0);
+  const expansionProgressHideTimerRef = useRef<number | null>(null);
+  const expansionNoticeShowTimerRef = useRef<number | null>(null);
+  const expansionRunIdRef = useRef(0);
+  const nextExpansionRequestIdRef = useRef(0);
+  const expansionRequestsRef = useRef<Map<number, { runId: number; requestId: number }>>(new Map());
   const expandingNodeIdsRef = useRef<Set<number>>(new Set());
   const dragDepthRef = useRef(0);
   const [sourceInfo, setSourceInfo] = useState({
@@ -38,6 +49,7 @@ export function App({ surface }: AppProps) {
   const [rootIds, setRootIds] = useState<number[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [isParsing, setIsParsing] = useState(false);
+  const [isExpanding, setIsExpanding] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -64,6 +76,12 @@ export function App({ surface }: AppProps) {
       if (response.requestId !== latestRequestIdRef.current) return;
 
       if (response.type === "progress") {
+        if (
+          expansionProgressSuppressedRef.current ||
+          (expandingNodeIdsRef.current.size > 0 && debouncedQueryRef.current.trim())
+        ) {
+          return;
+        }
         setProgress(response.total === 0 ? 0 : response.parsed / response.total);
         const stage = labels.parseStages[response.stage];
         const percent = Math.max(0, Math.min(100, Math.round((response.parsed / response.total) * 100)));
@@ -72,7 +90,7 @@ export function App({ surface }: AppProps) {
       }
 
       if (response.type === "error") {
-        expandingNodeIdsRef.current.clear();
+        resetExpansionTracking();
         setIsParsing(false);
         setProgress(0);
         setNotice(null);
@@ -99,27 +117,40 @@ export function App({ surface }: AppProps) {
       }
 
       if (response.type === "expanded") {
+        const requestInfo = expansionRequestsRef.current.get(response.nodeId);
+        if (
+          !requestInfo ||
+          requestInfo.runId !== expansionRunIdRef.current ||
+          requestInfo.requestId !== response.expandRequestId
+        ) {
+          return;
+        }
+        expansionRequestsRef.current.delete(response.nodeId);
         expandingNodeIdsRef.current.delete(response.nodeId);
+        clearExpansionNoticeShowTimer();
         setNodes((current) => {
           const existingIds = new Set(current.map((node) => node.id));
-          const next = current.map((node) =>
-            node.id === response.nodeId ? { ...node, children: response.childIds } : node
-          );
+          const existingNodesByIdentity = new Map(current.map((node) => [getNodeIdentity(node), node]));
+          const childIds = response.children.map((child) => existingNodesByIdentity.get(getNodeIdentity(child))?.id ?? child.id);
+          const next = current.map((node) => (node.id === response.nodeId ? { ...node, children: childIds } : node));
           for (const child of response.children) {
-            if (!existingIds.has(child.id)) next.push(child);
+            if (!existingIds.has(child.id) && !existingNodesByIdentity.has(getNodeIdentity(child))) next.push(child);
           }
           return next;
         });
         setExpandedIds((current) => new Set(current).add(response.nodeId));
         setProgress(0);
-        setNotice(null);
+        if (expansionNoticeActiveRef.current && expandingNodeIdsRef.current.size === 0) {
+          expansionNoticeActiveRef.current = false;
+          setNotice(null);
+        }
         return;
       }
 
       setIsParsing(false);
       setError(null);
       setNotice(null);
-      expandingNodeIdsRef.current.clear();
+      resetExpansionTracking();
       setNodes(response.nodes);
       setRootIds(response.rootIds);
       setExpandedIds(new Set(response.rootIds));
@@ -132,6 +163,8 @@ export function App({ surface }: AppProps) {
       if (autoParseTimerRef.current !== null) {
         window.clearTimeout(autoParseTimerRef.current);
       }
+      clearExpansionProgressHideTimer();
+      clearExpansionNoticeShowTimer();
       worker.terminate();
     };
   }, [labels]);
@@ -209,12 +242,27 @@ export function App({ surface }: AppProps) {
   const matches = useMemo<SearchMatch[]>(() => mergeMatches(localMatches, workerMatches), [localMatches, workerMatches]);
   const matchedIds = useMemo(() => new Set(matches.map((match) => match.nodeId)), [matches]);
   const activeMatchId = matches[activeMatchIndex]?.nodeId ?? null;
+  const expandableNodeCount = useMemo(
+    () => nodes.reduce((count, node) => count + (node.childCount > 0 ? 1 : 0), 0),
+    [nodes]
+  );
+  const expandedExpandableNodeCount = useMemo(
+    () => nodes.reduce((count, node) => count + (node.childCount > 0 && expandedIds.has(node.id) ? 1 : 0), 0),
+    [expandedIds, nodes]
+  );
+  const expandedNodePercent =
+    expandableNodeCount === 0 ? 100 : Math.round((expandedExpandableNodeCount / expandableNodeCount) * 100);
 
   useEffect(() => {
     debouncedQueryRef.current = debouncedQuery;
     setWorkerMatches([]);
     if (debouncedQuery.trim()) {
+      cancelExpansionWork();
+      pendingSearchRevealRef.current = { query: debouncedQuery, index: 0 };
       setPendingExpandLevel(null);
+    } else {
+      pendingSearchRevealRef.current = null;
+      setSearchScrollTargetId(null);
     }
 
     if (!debouncedQuery.trim() || !workerRef.current) return;
@@ -225,7 +273,18 @@ export function App({ surface }: AppProps) {
       query: debouncedQuery,
       limit: 500
     });
-  }, [debouncedQuery, nodes.length]);
+  }, [debouncedQuery]);
+
+  useEffect(() => {
+    if (!debouncedQuery.trim() || !workerRef.current) return;
+
+    workerRef.current.postMessage({
+      type: "search",
+      requestId: latestRequestIdRef.current,
+      query: debouncedQuery,
+      limit: 500
+    });
+  }, [nodes.length]);
 
   useEffect(() => {
     setActiveMatchIndex(0);
@@ -234,6 +293,9 @@ export function App({ surface }: AppProps) {
   useEffect(() => {
     if (matches.length === 0) {
       setSearchScrollTargetId(null);
+      if (!debouncedQuery.trim()) {
+        pendingSearchRevealRef.current = null;
+      }
       return;
     }
 
@@ -246,21 +308,33 @@ export function App({ surface }: AppProps) {
     const targetId = matches[nextIndex]?.nodeId;
     if (targetId === undefined) return;
 
+    const pendingReveal = pendingSearchRevealRef.current;
+    if (!pendingReveal || pendingReveal.query !== debouncedQuery || pendingReveal.index !== nextIndex) return;
+
+    pendingSearchRevealRef.current = null;
     revealNode(targetId);
     setSearchScrollTargetId(targetId);
     setSearchScrollSignal((current) => current + 1);
-  }, [activeMatchIndex, matches, nodesById]);
+  }, [activeMatchIndex, debouncedQuery, matches, nodesById]);
 
   useEffect(() => {
     if (pendingExpandLevel === null) return;
 
     const changed = expandLoadedNodesToLevel(pendingExpandLevel);
-    const requested = requestUnloadedNodesToLevel(pendingExpandLevel);
+    const requested = requestUnloadedNodesToLevel(pendingExpandLevel, expansionRunIdRef.current);
 
-    if (!changed && !requested) {
+    if (!changed && !requested && expandingNodeIdsRef.current.size === 0) {
       setPendingExpandLevel(null);
+      finishExpansionRun();
     }
   }, [nodes, pendingExpandLevel]);
+
+  useEffect(() => {
+    if (!isExpanding || pendingExpandLevel !== null || expandingNodeIdsRef.current.size > 0) return;
+    if (expandedNodePercent === 100) {
+      finishExpansionRun();
+    }
+  }, [expandedNodePercent, isExpanding, pendingExpandLevel]);
 
   function getSource() {
     return sourceTextRef.current;
@@ -317,7 +391,7 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
-    expandingNodeIdsRef.current.clear();
+    resetExpansionTracking();
     setPendingExpandLevel(null);
     setNotice(source.length > LARGE_SOURCE_CHARS ? labels.parsingLarge : null);
 
@@ -341,7 +415,7 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
-    expandingNodeIdsRef.current.clear();
+    resetExpansionTracking();
     setPendingExpandLevel(null);
     setNotice(labels.parsingLarge);
     workerRef.current.postMessage({ type: "parse", blob, requestId });
@@ -414,6 +488,7 @@ export function App({ surface }: AppProps) {
       setRootIds([]);
       setExpandedIds(new Set());
       setWorkerMatches([]);
+      resetExpansionTracking();
 
       setError(null);
       setNotice(labels.fileLoaded(file.name));
@@ -503,24 +578,30 @@ export function App({ surface }: AppProps) {
     const node = nodesById.get(id);
     if (!node) return;
 
-    setExpandedIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) {
+    if (expandedIds.has(id)) {
+      setExpandedIds((current) => {
+        if (!current.has(id)) return current;
+        const next = new Set(current);
         next.delete(id);
         return next;
-      }
+      });
+      return;
+    }
 
-      if (requestNodeExpansion(node)) {
-        setNotice(labels.parseProgress(labels.parseStages.building, 0));
-        return next;
-      }
+    if (requestNodeExpansion(node, expansionRunIdRef.current)) {
+      scheduleExpansionNotice();
+      return;
+    }
 
+    setExpandedIds((current) => {
+      if (current.has(id)) return current;
+      const next = new Set(current);
       next.add(id);
       return next;
     });
   };
 
-  const requestNodeExpansion = (node: JsonNode): boolean => {
+  const requestNodeExpansion = (node: JsonNode, runId = expansionRunIdRef.current): boolean => {
     if (node.childCount <= 0 || node.children || node.valueStart === undefined || !workerRef.current) {
       return false;
     }
@@ -529,9 +610,13 @@ export function App({ surface }: AppProps) {
     }
 
     expandingNodeIdsRef.current.add(node.id);
+    const expandRequestId = nextExpansionRequestIdRef.current + 1;
+    nextExpansionRequestIdRef.current = expandRequestId;
+    expansionRequestsRef.current.set(node.id, { runId, requestId: expandRequestId });
     workerRef.current.postMessage({
       type: "expand",
       requestId: latestRequestIdRef.current,
+      expandRequestId,
       nodeId: node.id,
       valueStart: node.valueStart,
       depth: node.depth
@@ -546,10 +631,11 @@ export function App({ surface }: AppProps) {
 
   const expandToLevel = (level: number) => {
     const normalized = Number.isFinite(level) ? Math.max(1, Math.floor(level)) : 1;
+    const runId = startExpansionRun();
     setExpandLevel(normalized);
     setPendingExpandLevel(normalized);
     expandLoadedNodesToLevel(normalized);
-    requestUnloadedNodesToLevel(normalized);
+    requestUnloadedNodesToLevel(normalized, runId);
   };
 
   const expandLoadedNodesToLevel = (level: number): boolean => {
@@ -567,28 +653,108 @@ export function App({ surface }: AppProps) {
     return changed;
   };
 
-  const requestUnloadedNodesToLevel = (level: number): boolean => {
-    if (debouncedQueryRef.current.trim()) {
-      return false;
-    }
-
+  const requestUnloadedNodesToLevel = (level: number, runId = expansionRunIdRef.current): boolean => {
     let requested = false;
-    let requestCount = 0;
+    let availableSlots = Math.max(0, MAX_CONCURRENT_EXPANSION_REQUESTS - expandingNodeIdsRef.current.size);
+    if (availableSlots === 0) return false;
+
     for (const node of nodes) {
-      if (requestCount >= MAX_EXPANSION_REQUESTS_PER_BATCH) break;
-      if (node.depth < level && requestNodeExpansion(node)) {
+      if (availableSlots === 0) break;
+      if (node.depth < level && requestNodeExpansion(node, runId)) {
         requested = true;
-        requestCount += 1;
+        availableSlots -= 1;
       }
     }
     if (requested) {
-      setNotice(labels.parseProgress(labels.parseStages.building, 0));
+      showExpansionNotice();
     }
     return requested;
   };
 
-  const collapseAll = () => {
+  const showExpansionNotice = () => {
+    if (debouncedQueryRef.current.trim()) return;
+
+    expansionNoticeActiveRef.current = true;
+    expansionProgressSuppressedRef.current = false;
+    setNotice(labels.parseProgress(labels.parseStages.building, 0));
+  };
+
+  const scheduleExpansionNotice = () => {
+    clearExpansionNoticeShowTimer();
+    expansionNoticeShowTimerRef.current = window.setTimeout(() => {
+      expansionNoticeShowTimerRef.current = null;
+      showExpansionNotice();
+    }, EXPANSION_NOTICE_DELAY_MS);
+  };
+
+  const clearExpansionNoticeShowTimer = () => {
+    if (expansionNoticeShowTimerRef.current === null) return;
+    window.clearTimeout(expansionNoticeShowTimerRef.current);
+    expansionNoticeShowTimerRef.current = null;
+  };
+
+  const startExpansionRun = (): number => {
+    expansionRunIdRef.current += 1;
+    expansionRequestsRef.current.clear();
+    expandingNodeIdsRef.current.clear();
+    expansionNoticeActiveRef.current = false;
+    expansionProgressSuppressedRef.current = false;
+    expansionProgressStartedAtRef.current = performance.now();
+    clearExpansionProgressHideTimer();
+    setIsExpanding(true);
+    return expansionRunIdRef.current;
+  };
+
+  const finishExpansionRun = () => {
+    const elapsed = performance.now() - expansionProgressStartedAtRef.current;
+    const remaining = Math.max(0, MIN_EXPANSION_PROGRESS_MS - elapsed);
+    clearExpansionProgressHideTimer();
+
+    if (remaining === 0) {
+      setIsExpanding(false);
+      return;
+    }
+
+    expansionProgressHideTimerRef.current = window.setTimeout(() => {
+      expansionProgressHideTimerRef.current = null;
+      setIsExpanding(false);
+    }, remaining);
+  };
+
+  const clearExpansionProgressHideTimer = () => {
+    if (expansionProgressHideTimerRef.current === null) return;
+
+    window.clearTimeout(expansionProgressHideTimerRef.current);
+    expansionProgressHideTimerRef.current = null;
+  };
+
+  const resetExpansionTracking = () => {
+    expansionRunIdRef.current += 1;
+    expansionRequestsRef.current.clear();
+    expandingNodeIdsRef.current.clear();
+    expansionNoticeActiveRef.current = false;
+    expansionProgressSuppressedRef.current = false;
+    clearExpansionProgressHideTimer();
+    clearExpansionNoticeShowTimer();
+    setIsExpanding(false);
+  };
+
+  const cancelExpansionWork = () => {
+    expansionRunIdRef.current += 1;
+    expansionRequestsRef.current.clear();
+    expandingNodeIdsRef.current.clear();
+    expansionNoticeActiveRef.current = false;
+    expansionProgressSuppressedRef.current = true;
+    clearExpansionProgressHideTimer();
+    clearExpansionNoticeShowTimer();
+    setIsExpanding(false);
     setPendingExpandLevel(null);
+    setProgress(0);
+    setNotice(null);
+  };
+
+  const collapseAll = () => {
+    cancelExpansionWork();
     setExpandedIds(new Set(rootIds));
   };
 
@@ -624,7 +790,8 @@ export function App({ surface }: AppProps) {
     });
   };
 
-  const stats = `${nodes.length.toLocaleString()} nodes | ${sourceInfo.sizeLabel} | visible ${visibleRange.start + 1}-${Math.min(visibleRange.stop + 1, visibleNodes.length)} of ${visibleNodes.length.toLocaleString()}`;
+  const stats = `${nodes.length.toLocaleString()} nodes | expanded ${expandedExpandableNodeCount.toLocaleString()}/${expandableNodeCount.toLocaleString()} (${expandedNodePercent}%) | ${sourceInfo.sizeLabel} | visible ${visibleRange.start + 1}-${Math.min(visibleRange.stop + 1, visibleNodes.length)} of ${visibleNodes.length.toLocaleString()}`;
+  const headerProgress = isParsing ? progress : expandedNodePercent / 100;
 
   return (
     <main className={`app app-${surface}`}>
@@ -634,9 +801,9 @@ export function App({ surface }: AppProps) {
           <p>{stats}</p>
         </div>
         <p className="shortcut-hint">{labels.shortcutsHint}</p>
-        {isParsing && (
-          <div className="progress" aria-label="Parse progress">
-            <span style={{ width: `${Math.round(progress * 100)}%` }} />
+        {(isParsing || isExpanding) && (
+          <div className="progress" aria-label={isParsing ? "Parse progress" : "Expand progress"}>
+            <span style={{ width: `${Math.round(headerProgress * 100)}%` }} />
           </div>
         )}
       </header>
@@ -661,8 +828,7 @@ export function App({ surface }: AppProps) {
           setRootIds([]);
           setExpandedIds(new Set());
           setWorkerMatches([]);
-          expandingNodeIdsRef.current.clear();
-          setPendingExpandLevel(null);
+          cancelExpansionWork();
           setError(null);
           setNotice(null);
         }}
@@ -747,6 +913,10 @@ function mergeMatches(primary: SearchMatch[], secondary: SearchMatch[]): SearchM
   }
 
   return merged;
+}
+
+function getNodeIdentity(node: JsonNode): string {
+  return `${node.parentId ?? "root"}\u0000${node.key ?? ""}\u0000${node.valueStart ?? node.id}`;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

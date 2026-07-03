@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JsonBolt Preview</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: #f7f8fb; color: #17202a; font-size: 14px;
+  width: 1280px; height: 800px; overflow: hidden;
+}
+
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 24px; border-bottom: 1px solid #d8e0eb;
+  background: rgba(247,248,251,0.96);
+}
+.header-left h1 { font-size: 20px; font-weight: 700; color: #101820; }
+.header-left p { font-size: 12px; color: #687386; margin-top: 4px; }
+.header-right { font-size: 11px; color: #687386; text-align: right; line-height: 1.6; }
+
+.toolbar {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 12px 24px; border-bottom: 1px solid #e5ebf3;
+  background: rgba(247,248,251,0.96);
+}
+.toolbar button {
+  height: 32px; min-width: 72px;
+  border: 1px solid #c9d2df; border-radius: 6px;
+  background: #fff; color: #17202a; cursor: pointer;
+  padding: 0 10px; font-size: 12px;
+}
+.toolbar button.primary { background: #2f6fed; color: #fff; border-color: #2f6fed; }
+.toolbar button:hover { border-color: #4d80d8; }
+.toolbar button.primary:hover { background: #1e5bd0; }
+.toolbar .level-group {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; border: 1px solid #c9d2df; border-radius: 6px;
+  padding: 0 10px; background: #fff; font-size: 12px;
+}
+.toolbar .level-group span { color: #4d5b6d; }
+.toolbar .level-group input {
+  width: 50px; height: 24px; border: 0; outline: none; font-size: 12px;
+}
+
+.workspace {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 12px; padding: 16px 24px; height: calc(100% - 115px);
+}
+
+.editor-pane {
+  border: 1px solid #c9d2df; border-radius: 8px; background: #fff;
+  padding: 16px; overflow: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px; line-height: 1.6; color: #111827;
+  white-space: pre; tab-size: 2;
+}
+
+.tree-pane {
+  display: flex; flex-direction: column; height: 100%;
+}
+
+.search-box {
+  display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+}
+.search-box input {
+  flex: 1; height: 34px; border: 1px solid #c9d2df; border-radius: 6px;
+  padding: 0 10px; font-size: 12px; outline: none;
+}
+.search-box input:focus { border-color: #2f6fed; box-shadow: 0 0 0 3px rgba(47,111,237,0.12); }
+.search-box span { color: #687386; font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+.search-box button {
+  height: 32px; border: 1px solid #c9d2df; border-radius: 6px;
+  background: #fff; padding: 0 10px; cursor: pointer; font-size: 12px;
+}
+
+.tree-view {
+  flex: 1; border: 1px solid #c9d2df; border-radius: 8px; background: #fff;
+  overflow: auto;
+}
+.row {
+  display: flex; align-items: center; height: 28px; min-width: fit-content;
+  border-bottom: 1px solid #eef2f6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px; white-space: nowrap; padding-right: 16px;
+}
+.row .twisty {
+  width: 24px; min-width: 24px; text-align: center;
+  color: #4d5b6d; font-size: 10px; user-select: none;
+}
+.row .key { color: #8b3f9f; }
+.row .sep { color: #4d5b6d; }
+.row .str { color: #176f41; }
+.row .num { color: #0b62a3; }
+.row .bool { color: #b25100; }
+.row .null { color: #687386; }
+.row .punc { color: #4d5b6d; }
+.row .count { color: #7d8898; margin-left: 8px; font-size: 11px; }
+.row.highlight { background: #fff7d6; }
+.row.active { background: #dff1ff; outline: 1px solid #2f6fed; outline-offset: -1px; }
+
+.stats-bar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 6px 0; font-size: 11px; color: #687386;
+}
+
+/* Overlay badge for screenshot */
+.badge {
+  position: fixed; bottom: 16px; right: 16px;
+  background: rgba(0,0,0,0.7); color: #fff;
+  padding: 4px 12px; border-radius: 4px;
+  font-size: 11px;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <h1>⚡ JsonBolt</h1>
+    <p>JSON viewer · Formatter · Search · Virtual tree</p>
+  </div>
+  <div class="header-right">
+    Ctrl/Cmd+Enter Parse · Ctrl/Cmd+F Search
+  </div>
+</div>
+
+<div class="toolbar">
+  <button class="primary">▶ Parse</button>
+  <button>📋 Paste</button>
+  <button>📄 Page</button>
+  <button>↕ Format</button>
+  <button>🔽 Minify</button>
+  <button>📑 Copy</button>
+  <button>⊞ Expand</button>
+  <button>⊟ Collapse</button>
+  <button>✕ Clear</button>
+  <div class="level-group"><span>Level:</span><input type="number" value="3"></div>
+</div>
+
+<div class="workspace">
+  <div class="editor-pane">{<span style="color:#8b3f9f">"store"</span>: {<br>  <span style="color:#8b3f9f">"name"</span>: <span style="color:#176f41">"JsonBolt"</span>,<br>  <span style="color:#8b3f9f">"version"</span>: <span style="color:#0b62a3">"0.1.1"</span>,<br>  <span style="color:#8b3f9f">"features"</span>: [<br>    <span style="color:#176f41">"parse"</span>, <span style="color:#176f41">"format"</span>,<br>    <span style="color:#176f41">"search"</span>, <span style="color:#176f41">"expand"</span><br>  ],<br>  <span style="color:#8b3f9f">"settings"</span>: {<br>    <span style="color:#8b3f9f">"theme"</span>: <span style="color:#176f41">"light"</span>,<br>    <span style="color:#8b3f9f">"virtualScrolling"</span>: <span style="color:#b25100">true</span>,<br>    <span style="color:#8b3f9f">"workerBackend"</span>: <span style="color:#b25100">true</span><br>  },<br>  <span style="color:#8b3f9f">"stats"</span>: {<br>    <span style="color:#8b3f9f">"totalNodes"</span>: <span style="color:#0b62a3">184</span>,<br>    <span style="color:#8b3f9f">"maxDepth"</span>: <span style="color:#0b62a3">6</span>,<br>    <span style="color:#8b3f9f">"fileSize"</span>: <span style="color:#176f41">"12.4 KB"</span><br>  }<br>}}</div>
+
+  <div class="tree-pane">
+    <div class="search-box">
+      <input type="text" placeholder="Search key or value..." value="settings">
+      <span>1/2</span>
+      <button>◀ Prev</button>
+      <button>Next ▶</button>
+    </div>
+    <div class="stats-bar">
+      <span>184 nodes</span><span>|</span><span>12.4 KB</span><span>|</span><span>Visible 1–18 of 26</span>
+    </div>
+    <div class="tree-view">
+      <div class="row" style="padding-left:0px"><span class="twisty">▼</span><span class="punc">{</span><span class="count">5 keys</span></div>
+      <div class="row" style="padding-left:20px"><span class="twisty">▼</span><span class="key">"store"</span><span class="sep">:</span><span class="punc">{</span><span class="count">5 keys</span></div>
+      <div class="row" style="padding-left:40px"><span class="twisty"></span><span class="key">"name"</span><span class="sep">:</span><span class="str">"JsonBolt"</span></div>
+      <div class="row" style="padding-left:40px"><span class="twisty"></span><span class="key">"version"</span><span class="sep">:</span><span class="str">"0.1.1"</span></div>
+      <div class="row" style="padding-left:40px"><span class="twisty">▼</span><span class="key">"features"</span><span class="sep">:</span><span class="punc">[</span><span class="count">4 items</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="str">"parse"</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="str">"format"</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="str">"search"</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="str">"expand"</span></div>
+      <div class="row active" style="padding-left:40px"><span class="twisty">▼</span><span class="key">"settings"</span><span class="sep">:</span><span class="punc">{</span><span class="count">3 keys</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="key highlight">"theme"</span><span class="sep">:</span><span class="str">"light"</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="key">"virtualScrolling"</span><span class="sep">:</span><span class="bool">true</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="key">"workerBackend"</span><span class="sep">:</span><span class="bool">true</span></div>
+      <div class="row" style="padding-left:40px"><span class="twisty">▼</span><span class="key">"stats"</span><span class="sep">:</span><span class="punc">{</span><span class="count">3 keys</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="key">"totalNodes"</span><span class="sep">:</span><span class="num">184</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="key">"maxDepth"</span><span class="sep">:</span><span class="num">6</span></div>
+      <div class="row" style="padding-left:60px"><span class="twisty"></span><span class="key">"fileSize"</span><span class="sep">:</span><span class="str">"12.4 KB"</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="badge">Screenshot 1 — Main View</div>
+</body>
+</html>

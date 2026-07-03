@@ -35,6 +35,7 @@ export type ParserRequest =
   | {
       type: "expand";
       requestId: number;
+      expandRequestId: number;
       nodeId: number;
       valueStart: number;
       depth: number;
@@ -65,6 +66,7 @@ export type ParserResponse =
   | {
       type: "expanded";
       requestId: number;
+      expandRequestId: number;
       nodeId: number;
       children: JsonNode[];
       childIds: number[];
