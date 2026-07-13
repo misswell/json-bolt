@@ -13,6 +13,8 @@ interface JsonViewerProps {
   searchScrollTargetId: number | null;
   searchScrollSignal: number;
   onToggle: (id: number) => void;
+  onCopy: (id: number) => void;
+  copyingNodeId: number | null;
   onVisibleRangeChange: (startIndex: number, stopIndex: number) => void;
 }
 
@@ -27,6 +29,8 @@ export function JsonViewer({
   searchScrollTargetId,
   searchScrollSignal,
   onToggle,
+  onCopy,
+  copyingNodeId,
   onVisibleRangeChange
 }: JsonViewerProps) {
   const height = Math.max(240, Math.min(620, window.innerHeight - 330));
@@ -70,6 +74,8 @@ export function JsonViewer({
                 isMatched={matchedIds.has(node.id)}
                 isActiveMatch={activeMatchId === node.id}
                 onToggle={onToggle}
+                onCopy={onCopy}
+                isCopying={copyingNodeId !== null}
               />
             </div>
           );

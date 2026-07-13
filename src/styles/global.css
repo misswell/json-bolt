@@ -314,6 +314,33 @@ input:focus {
   color: #7d8898;
 }
 
+.copy-node {
+  position: sticky;
+  right: 4px;
+  flex: 0 0 auto;
+  min-width: auto;
+  min-height: 22px;
+  height: 22px;
+  margin-left: auto;
+  padding: 0 7px;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.94);
+  font-family: inherit;
+  font-size: 11px;
+  opacity: 0;
+}
+
+.json-row:hover .copy-node,
+.copy-node:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .copy-node {
+    opacity: 1;
+  }
+}
+
 @media (max-width: 720px) {
   body {
     min-width: 320px;

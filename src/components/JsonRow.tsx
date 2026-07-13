@@ -8,6 +8,8 @@ interface JsonRowProps {
   isMatched: boolean;
   isActiveMatch: boolean;
   onToggle: (id: number) => void;
+  onCopy: (id: number) => void;
+  isCopying: boolean;
 }
 
 export function JsonRow({
@@ -16,7 +18,9 @@ export function JsonRow({
   isExpanded,
   isMatched,
   isActiveMatch,
-  onToggle
+  onToggle,
+  onCopy,
+  isCopying
 }: JsonRowProps) {
   const expandable = node.childCount > 0;
   const typeClass = `json-type json-type-${node.type}`;
@@ -44,6 +48,16 @@ export function JsonRow({
           {node.childCount} {node.type === "array" ? labels.items : labels.keys}
         </span>
       )}
+      <button
+        type="button"
+        className="copy-node"
+        onClick={() => onCopy(node.id)}
+        title={labels.copyValueTitle}
+        aria-label={labels.copyValueTitle}
+        disabled={isCopying}
+      >
+        {labels.copyValue}
+      </button>
     </div>
   );
 }

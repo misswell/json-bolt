@@ -14,6 +14,9 @@ export interface Messages {
   minifyTitle: string;
   copy: string;
   copyTitle: string;
+  copyValue: string;
+  copyValueTitle: string;
+  copyValueTooLarge: string;
   copied: string;
   expand: string;
   expandTitle: string;
@@ -47,6 +50,7 @@ export interface Messages {
   unableReadPage: string;
   clipboardEmpty: string;
   clipboardReadFailed: string;
+  clipboardWriteFailed: string;
   dropFileHint: string;
   fileLoaded: (name: string) => string;
   fileReadFailed: string;
@@ -69,6 +73,9 @@ const en: Messages = {
   minifyTitle: "Minify JSON",
   copy: "Copy",
   copyTitle: "Copy JSON",
+  copyValue: "Copy",
+  copyValueTitle: "Copy complete node value",
+  copyValueTooLarge: "This node is too large for safe text copying. Use the toolbar Copy button for the complete file.",
   copied: "Copied.",
   expand: "Expand",
   expandTitle: "Expand all nodes",
@@ -107,6 +114,7 @@ const en: Messages = {
   unableReadPage: "Unable to read the current page.",
   clipboardEmpty: "Clipboard does not contain text.",
   clipboardReadFailed: "Unable to read clipboard. Paste manually or grant clipboard permission.",
+  clipboardWriteFailed: "Unable to copy to clipboard. Grant clipboard permission and try again.",
   dropFileHint: "Drop a JSON or text file to replace and parse it.",
   fileLoaded: (name) => `Loaded ${name}. Parsing in the background.`,
   fileReadFailed: "Unable to read the dropped file.",
@@ -129,6 +137,9 @@ const zh: Messages = {
   minifyTitle: "压缩 JSON",
   copy: "复制",
   copyTitle: "复制 JSON",
+  copyValue: "复制",
+  copyValueTitle: "复制节点完整值",
+  copyValueTooLarge: "该节点过大，无法安全地转为文本复制；请使用工具栏的“复制”复制完整文件。",
   copied: "已复制。",
   expand: "展开",
   expandTitle: "展开全部节点",
@@ -167,6 +178,7 @@ const zh: Messages = {
   unableReadPage: "无法读取当前页面。",
   clipboardEmpty: "剪贴板中没有文本。",
   clipboardReadFailed: "无法读取剪贴板，请手动粘贴或授予剪贴板权限。",
+  clipboardWriteFailed: "无法复制到剪贴板，请授予剪贴板权限后重试。",
   dropFileHint: "松开即可载入 JSON 或文本文件并自动解析。",
   fileLoaded: (name) => `已载入 ${name}，正在后台解析。`,
   fileReadFailed: "无法读取拖入的文件。",

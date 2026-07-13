@@ -179,6 +179,41 @@ await check("worker expands lazy object children", async () => {
   assert(expanded.children.some((node) => node.key === "claims"), "expanded children missing claims");
 });
 
+await check("worker returns the complete raw value for a visible node", async () => {
+  const worker = await createWorkerHarness();
+  const value = "x".repeat(500);
+  const source = JSON.stringify([value]);
+  const parseResponses = await worker.request({ type: "parse", text: source, requestId: 16 });
+  const success = parseResponses.find((item) => item.type === "success");
+  const node = success.nodes.find((item) => item.key === "0");
+  const responses = await worker.request({
+    type: "readValue",
+    requestId: 16,
+    valueRequestId: 1,
+    nodeId: node.id
+  });
+  const result = responses.find((item) => item.type === "value");
+  assert(result?.text === JSON.stringify(value), "worker returned a truncated node value", result?.text?.length);
+
+  const streamWorker = await createWorkerHarness({ forceStream: true });
+  const streamSource = JSON.stringify(["中文😀value"]);
+  const streamParseResponses = await streamWorker.request({
+    type: "parse",
+    blob: new Blob([streamSource]),
+    requestId: 17
+  });
+  const streamSuccess = streamParseResponses.find((item) => item.type === "success");
+  const streamNode = streamSuccess.nodes.find((item) => item.key === "0");
+  const streamResponses = await streamWorker.request({
+    type: "readValue",
+    requestId: 17,
+    valueRequestId: 2,
+    nodeId: streamNode.id
+  });
+  const streamResult = streamResponses.find((item) => item.type === "value");
+  assert(streamResult?.text === JSON.stringify("中文😀value"), "stream worker returned the wrong node value");
+});
+
 await check("worker rejects trailing JSON content", async () => {
   const worker = await createWorkerHarness();
   const responses = await worker.request({ type: "parse", text: "{\"a\":1}\n{\"b\":2}", requestId: 4 });

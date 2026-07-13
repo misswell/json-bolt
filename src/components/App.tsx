@@ -16,6 +16,7 @@ const AUTO_PARSE_DELAY_MS = 650;
 const MAX_CONCURRENT_EXPANSION_REQUESTS = 1;
 const MIN_EXPANSION_PROGRESS_MS = 450;
 const EXPANSION_NOTICE_DELAY_MS = 200;
+const MAX_UTF16_NODE_COPY_CHARS = 16 * 1024 * 1024;
 
 interface AppProps {
   surface: "page" | "sidepanel";
@@ -40,6 +41,8 @@ export function App({ surface }: AppProps) {
   const expansionNoticeShowTimerRef = useRef<number | null>(null);
   const expansionRunIdRef = useRef(0);
   const nextExpansionRequestIdRef = useRef(0);
+  const nextValueRequestIdRef = useRef(0);
+  const activeValueRequestIdRef = useRef<number | null>(null);
   const expansionRequestsRef = useRef<Map<number, { runId: number; requestId: number }>>(new Map());
   const expandingNodeIdsRef = useRef<Set<number>>(new Set());
   const dragDepthRef = useRef(0);
@@ -71,6 +74,7 @@ export function App({ surface }: AppProps) {
   const [expandLevel, setExpandLevel] = useState(DEFAULT_EXPAND_LEVEL);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [pendingExpandLevel, setPendingExpandLevel] = useState<ExpansionTarget>(null);
+  const [copyingNodeId, setCopyingNodeId] = useState<number | null>(null);
   const workerRef = useRef<Worker | null>(null);
 
   useEffect(() => {
@@ -82,6 +86,24 @@ export function App({ surface }: AppProps) {
     worker.onmessage = (event: MessageEvent<ParserResponse>) => {
       const response = event.data;
       if (response.requestId !== latestRequestIdRef.current) return;
+
+      if (response.type === "value") {
+        if (activeValueRequestIdRef.current !== response.valueRequestId) return;
+        activeValueRequestIdRef.current = null;
+        setCopyingNodeId(null);
+        if (response.error || response.text === undefined) {
+          setError(response.error ?? labels.clipboardWriteFailed);
+          return;
+        }
+        void navigator.clipboard.writeText(response.text).then(
+          () => {
+            setError(null);
+            setNotice(labels.copied);
+          },
+          () => setError(labels.clipboardWriteFailed)
+        );
+        return;
+      }
 
       if (response.type === "progress") {
         if (
@@ -434,6 +456,7 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
+    cancelNodeCopy();
     replaceNodes([]);
     setRootIds([]);
     setExpandedIds(new Set());
@@ -461,6 +484,7 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
+    cancelNodeCopy();
     replaceNodes([]);
     setRootIds([]);
     setExpandedIds(new Set());
@@ -520,9 +544,63 @@ export function App({ surface }: AppProps) {
       }
       setNotice(labels.copied);
     } catch (copyError) {
-      setError(copyError instanceof Error ? copyError.message : labels.clipboardReadFailed);
+      setError(copyError instanceof Error ? copyError.message : labels.clipboardWriteFailed);
     }
   };
+
+  const copyNodeValue = async (id: number) => {
+    if (copyingNodeId !== null) return;
+    const node = nodesById.get(id);
+    if (node?.valueStart === undefined || node.valueEnd === undefined || !workerRef.current) return;
+
+    setCopyingNodeId(id);
+    setError(null);
+    const sourceBlob = sourceBlobRef.current;
+    try {
+      if (sourceBlob && node.offsetUnit === "byte") {
+        if (!navigator.clipboard.write || typeof ClipboardItem === "undefined") {
+          throw new Error(labels.clipboardWriteFailed);
+        }
+        const valueBlob = sourceBlob.slice(node.valueStart, node.valueEnd, "text/plain");
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": valueBlob })]);
+        setCopyingNodeId(null);
+        setNotice(labels.copied);
+        return;
+      }
+
+      if (!sourceBlob) {
+        await navigator.clipboard.writeText(sourceTextRef.current.slice(node.valueStart, node.valueEnd));
+        setCopyingNodeId(null);
+        setNotice(labels.copied);
+        return;
+      }
+
+      if (node.valueEnd - node.valueStart > MAX_UTF16_NODE_COPY_CHARS) {
+        setCopyingNodeId(null);
+        setError(labels.copyValueTooLarge);
+        return;
+      }
+    } catch {
+      setCopyingNodeId(null);
+      setError(labels.clipboardWriteFailed);
+      return;
+    }
+
+    const valueRequestId = nextValueRequestIdRef.current + 1;
+    nextValueRequestIdRef.current = valueRequestId;
+    activeValueRequestIdRef.current = valueRequestId;
+    workerRef.current.postMessage({
+      type: "readValue",
+      requestId: latestRequestIdRef.current,
+      valueRequestId,
+      nodeId: node.id
+    });
+  };
+
+  function cancelNodeCopy() {
+    activeValueRequestIdRef.current = null;
+    setCopyingNodeId(null);
+  }
 
   function replaceSourceAndParse(text: string, nextNotice?: string | null) {
     cancelAutoParse();
@@ -905,6 +983,7 @@ export function App({ surface }: AppProps) {
           sourceBlobRef.current = null;
           setSourceText("");
           replaceNodes([]);
+          cancelNodeCopy();
           setRootIds([]);
           setExpandedIds(new Set());
           setWorkerMatches([]);
@@ -970,6 +1049,8 @@ export function App({ surface }: AppProps) {
             searchScrollTargetId={searchScrollTargetId}
             searchScrollSignal={searchScrollSignal}
             onToggle={toggleNode}
+            onCopy={copyNodeValue}
+            copyingNodeId={copyingNodeId}
             onVisibleRangeChange={(start, stop) => setVisibleRange({ start, stop })}
           />
         </div>

@@ -30,12 +30,51 @@ ctx.onmessage = async (event: MessageEvent<ParserRequest>) => {
     return;
   }
 
+  if (message.type === "readValue") {
+    await handleReadValue(message);
+    return;
+  }
+
   if (message.type === "search") {
     const generation = searchGeneration + 1;
     searchGeneration = generation;
     void handleSearch(message, generation);
   }
 };
+
+async function handleReadValue(message: Extract<ParserRequest, { type: "readValue" }>): Promise<void> {
+  try {
+    const node = indexedNodesById.get(message.nodeId);
+    if (node?.valueStart === undefined || node.valueEnd === undefined) {
+      throw new Error("JSON node is no longer available");
+    }
+    let text: string;
+    if (sourceText) {
+      text = sourceText.slice(node.valueStart, node.valueEnd);
+    } else if (currentBlob) {
+      text = await decodeBlobRange(currentBlob, node.valueStart, node.valueEnd);
+    } else {
+      throw new Error("JSON source is no longer available");
+    }
+    if (!isActiveParse(message.requestId)) return;
+    postResponse({
+      type: "value",
+      requestId: message.requestId,
+      valueRequestId: message.valueRequestId,
+      nodeId: message.nodeId,
+      text
+    });
+  } catch (error) {
+    if (!isActiveParse(message.requestId)) return;
+    postResponse({
+      type: "value",
+      requestId: message.requestId,
+      valueRequestId: message.valueRequestId,
+      nodeId: message.nodeId,
+      error: getErrorMessage(error)
+    });
+  }
+}
 
 async function handleParse(message: Extract<ParserRequest, { type: "parse" }>): Promise<void> {
   const { requestId } = message;
@@ -260,6 +299,7 @@ function readNode(start: number, key: string | null, parentId: number | null, de
     searchableText: createSearchableText(valueStart, valueEnd, type),
     valueStart,
     valueEnd,
+    offsetUnit: "utf16",
     childCount
   };
 }
@@ -855,6 +895,7 @@ async function createStreamNode(
     searchableText: await createStreamSearchableText(blob, info),
     valueStart: info.start,
     valueEnd: info.end,
+    offsetUnit: "byte",
     childCount: info.childCount
   };
 }

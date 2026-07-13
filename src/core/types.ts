@@ -16,6 +16,7 @@ export interface JsonNode {
   searchableText?: string;
   valueStart?: number;
   valueEnd?: number;
+  offsetUnit?: "utf16" | "byte";
   children?: number[];
   childCount: number;
 }
@@ -45,6 +46,12 @@ export type ParserRequest =
       requestId: number;
       query: string;
       limit: number;
+    }
+  | {
+      type: "readValue";
+      requestId: number;
+      valueRequestId: number;
+      nodeId: number;
     };
 
 export type ParserStage = "reading" | "parsing" | "building" | "done";
@@ -76,6 +83,14 @@ export type ParserResponse =
       requestId: number;
       query: string;
       matches: SearchMatch[];
+    }
+  | {
+      type: "value";
+      requestId: number;
+      valueRequestId: number;
+      nodeId: number;
+      text?: string;
+      error?: string;
     }
   | {
       type: "error";
