@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes, formatJson, minifyJson } from "../core/formatter";
 import { getMessages } from "../core/i18n";
+import { DEFAULT_EXPAND_LEVEL, loadExpandLevel, normalizeExpandLevel, saveExpandLevel } from "../core/preferences";
 import { buildVisibleNodes } from "../core/tree";
 import { searchNodes } from "../core/search";
 import type { JsonNode, ParserResponse, SearchMatch } from "../core/types";
@@ -19,6 +20,8 @@ const EXPANSION_NOTICE_DELAY_MS = 200;
 interface AppProps {
   surface: "page" | "sidepanel";
 }
+
+type ExpansionTarget = number | "all" | null;
 
 export function App({ surface }: AppProps) {
   const labels = useMemo(() => getMessages(), []);
@@ -40,6 +43,10 @@ export function App({ surface }: AppProps) {
   const expansionRequestsRef = useRef<Map<number, { runId: number; requestId: number }>>(new Map());
   const expandingNodeIdsRef = useRef<Set<number>>(new Set());
   const dragDepthRef = useRef(0);
+  const sourceTabIdRef = useRef(surface === "page" ? getSourceTabId() : undefined);
+  const expandLevelSelectedRef = useRef(false);
+  const nodeIndexByIdRef = useRef<Map<number, number>>(new Map());
+  const nodeIdByIdentityRef = useRef<Map<string, number>>(new Map());
   const [sourceInfo, setSourceInfo] = useState({
     hasText: INITIAL_SOURCE.length > 0,
     sizeLabel: formatBytes(new Blob([INITIAL_SOURCE]).size)
@@ -60,9 +67,9 @@ export function App({ surface }: AppProps) {
   const [searchScrollTargetId, setSearchScrollTargetId] = useState<number | null>(null);
   const [searchScrollSignal, setSearchScrollSignal] = useState(0);
   const [visibleRange, setVisibleRange] = useState({ start: 0, stop: 0 });
-  const [expandLevel, setExpandLevel] = useState(2);
+  const [expandLevel, setExpandLevel] = useState(DEFAULT_EXPAND_LEVEL);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  const [pendingExpandLevel, setPendingExpandLevel] = useState<number | null>(null);
+  const [pendingExpandLevel, setPendingExpandLevel] = useState<ExpansionTarget>(null);
   const workerRef = useRef<Worker | null>(null);
 
   useEffect(() => {
@@ -101,7 +108,7 @@ export function App({ surface }: AppProps) {
               ? labels.errorPosition(response.position)
               : "";
         setError(`${response.message}${location}`);
-        setNodes([]);
+        replaceNodes([]);
         setRootIds([]);
         setExpandedIds(new Set());
         setWorkerMatches([]);
@@ -129,12 +136,20 @@ export function App({ surface }: AppProps) {
         expandingNodeIdsRef.current.delete(response.nodeId);
         clearExpansionNoticeShowTimer();
         setNodes((current) => {
-          const existingIds = new Set(current.map((node) => node.id));
-          const existingNodesByIdentity = new Map(current.map((node) => [getNodeIdentity(node), node]));
-          const childIds = response.children.map((child) => existingNodesByIdentity.get(getNodeIdentity(child))?.id ?? child.id);
-          const next = current.map((node) => (node.id === response.nodeId ? { ...node, children: childIds } : node));
+          const childIds = response.children.map(
+            (child) => nodeIdByIdentityRef.current.get(getNodeIdentity(child)) ?? child.id
+          );
+          const next = current.slice();
+          const parentIndex = nodeIndexByIdRef.current.get(response.nodeId);
+          if (parentIndex !== undefined) {
+            next[parentIndex] = { ...next[parentIndex], children: childIds };
+          }
           for (const child of response.children) {
-            if (!existingIds.has(child.id) && !existingNodesByIdentity.has(getNodeIdentity(child))) next.push(child);
+            const identity = getNodeIdentity(child);
+            if (nodeIdByIdentityRef.current.has(identity)) continue;
+            nodeIndexByIdRef.current.set(child.id, next.length);
+            nodeIdByIdentityRef.current.set(identity, child.id);
+            next.push(child);
           }
           return next;
         });
@@ -151,9 +166,13 @@ export function App({ surface }: AppProps) {
       setError(null);
       setNotice(null);
       resetExpansionTracking();
-      setNodes(response.nodes);
+      replaceNodes(response.nodes);
       setRootIds(response.rootIds);
-      setExpandedIds(new Set(response.rootIds));
+      setExpandedIds(
+        new Set(
+          response.rootIds.filter((rootId) => response.nodes.some((node) => node.id === rootId && node.children !== undefined))
+        )
+      );
       setWorkerMatches([]);
       setProgress(0);
       setActiveMatchIndex(0);
@@ -171,6 +190,16 @@ export function App({ surface }: AppProps) {
 
   useEffect(() => {
     window.setTimeout(() => parseCurrentSource(), 0);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void loadExpandLevel().then((level) => {
+      if (active && !expandLevelSelectedRef.current) setExpandLevel(level);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -265,7 +294,7 @@ export function App({ surface }: AppProps) {
       setSearchScrollTargetId(null);
     }
 
-    if (!debouncedQuery.trim() || !workerRef.current) return;
+    if (!workerRef.current) return;
 
     workerRef.current.postMessage({
       type: "search",
@@ -340,6 +369,12 @@ export function App({ surface }: AppProps) {
     return sourceTextRef.current;
   }
 
+  function replaceNodes(nextNodes: JsonNode[]) {
+    nodeIndexByIdRef.current = new Map(nextNodes.map((node, index) => [node.id, index]));
+    nodeIdByIdentityRef.current = new Map(nextNodes.map((node) => [getNodeIdentity(node), node.id]));
+    setNodes(nextNodes);
+  }
+
   function setSourceText(text: string, exactSize = false) {
     sourceBlobRef.current = null;
     sourceTextRef.current = text;
@@ -391,6 +426,9 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
+    replaceNodes([]);
+    setRootIds([]);
+    setExpandedIds(new Set());
     resetExpansionTracking();
     setPendingExpandLevel(null);
     setNotice(source.length > LARGE_SOURCE_CHARS ? labels.parsingLarge : null);
@@ -415,6 +453,9 @@ export function App({ surface }: AppProps) {
     setProgress(0);
     setError(null);
     setWorkerMatches([]);
+    replaceNodes([]);
+    setRootIds([]);
+    setExpandedIds(new Set());
     resetExpansionTracking();
     setPendingExpandLevel(null);
     setNotice(labels.parsingLarge);
@@ -438,6 +479,10 @@ export function App({ surface }: AppProps) {
 
   const updateSourceSafely = (updater: (text: string) => string) => {
     try {
+      if (sourceBlobRef.current) {
+        setNotice(labels.formatPaused);
+        return;
+      }
       const source = getSource();
       if (source.length > LARGE_SOURCE_CHARS) {
         setNotice(labels.formatPaused);
@@ -453,8 +498,22 @@ export function App({ surface }: AppProps) {
   };
 
   const copySource = async () => {
-    await navigator.clipboard.writeText(getSource());
-    setNotice(labels.copied);
+    try {
+      const blob = sourceBlobRef.current;
+      if (blob && navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
+        try {
+          const clipboardBlob = blob.slice(0, blob.size, "text/plain");
+          await navigator.clipboard.write([new ClipboardItem({ "text/plain": clipboardBlob })]);
+        } catch {
+          await navigator.clipboard.writeText(await blob.text());
+        }
+      } else {
+        await navigator.clipboard.writeText(blob ? await blob.text() : getSource());
+      }
+      setNotice(labels.copied);
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : labels.clipboardReadFailed);
+    }
   };
 
   function replaceSourceAndParse(text: string, nextNotice?: string | null) {
@@ -484,7 +543,7 @@ export function App({ surface }: AppProps) {
       cancelAutoParse();
       const preview = await file.slice(0, TEXTAREA_PREVIEW_MAX_CHARS).text();
       setSourceFile(file, preview);
-      setNodes([]);
+      replaceNodes([]);
       setRootIds([]);
       setExpandedIds(new Set());
       setWorkerMatches([]);
@@ -547,7 +606,7 @@ export function App({ surface }: AppProps) {
       return;
     }
 
-    let tabId = sourceTabId;
+    let tabId = sourceTabId ?? sourceTabIdRef.current;
     if (!tabId) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       tabId = tab.id;
@@ -625,12 +684,14 @@ export function App({ surface }: AppProps) {
   };
 
   const expandAll = () => {
-    const maxKnownDepth = nodes.reduce((maxDepth, node) => Math.max(maxDepth, node.depth), 0);
-    expandToLevel(Math.max(maxKnownDepth + 2, expandLevel));
+    const runId = startExpansionRun();
+    setPendingExpandLevel("all");
+    expandLoadedNodesToLevel("all");
+    requestUnloadedNodesToLevel("all", runId);
   };
 
   const expandToLevel = (level: number) => {
-    const normalized = Number.isFinite(level) ? Math.max(1, Math.floor(level)) : 1;
+    const normalized = normalizeExpandLevel(level);
     const runId = startExpansionRun();
     setExpandLevel(normalized);
     setPendingExpandLevel(normalized);
@@ -638,12 +699,19 @@ export function App({ surface }: AppProps) {
     requestUnloadedNodesToLevel(normalized, runId);
   };
 
-  const expandLoadedNodesToLevel = (level: number): boolean => {
+  const selectExpandLevel = (level: number) => {
+    const normalized = normalizeExpandLevel(level);
+    expandLevelSelectedRef.current = true;
+    expandToLevel(normalized);
+    void saveExpandLevel(normalized);
+  };
+
+  const expandLoadedNodesToLevel = (level: Exclude<ExpansionTarget, null>): boolean => {
     let changed = false;
     setExpandedIds((current) => {
       const next = new Set(current);
       for (const node of nodes) {
-        if (node.childCount > 0 && node.depth < level && node.children && !next.has(node.id)) {
+        if (node.childCount > 0 && shouldExpandNode(node, level) && node.children && !next.has(node.id)) {
           next.add(node.id);
           changed = true;
         }
@@ -653,14 +721,17 @@ export function App({ surface }: AppProps) {
     return changed;
   };
 
-  const requestUnloadedNodesToLevel = (level: number, runId = expansionRunIdRef.current): boolean => {
+  const requestUnloadedNodesToLevel = (
+    level: Exclude<ExpansionTarget, null>,
+    runId = expansionRunIdRef.current
+  ): boolean => {
     let requested = false;
     let availableSlots = Math.max(0, MAX_CONCURRENT_EXPANSION_REQUESTS - expandingNodeIdsRef.current.size);
     if (availableSlots === 0) return false;
 
     for (const node of nodes) {
       if (availableSlots === 0) break;
-      if (node.depth < level && requestNodeExpansion(node, runId)) {
+      if (shouldExpandNode(node, level) && requestNodeExpansion(node, runId)) {
         requested = true;
         availableSlots -= 1;
       }
@@ -813,7 +884,7 @@ export function App({ surface }: AppProps) {
         canParse={sourceInfo.hasText}
         isParsing={isParsing}
         expandLevel={expandLevel}
-        onExpandLevelChange={expandToLevel}
+        onExpandLevelChange={selectExpandLevel}
         onParse={parseCurrentSource}
         onPasteReplace={pasteReplace}
         onReadPage={() => readCurrentPage(undefined, true)}
@@ -824,7 +895,7 @@ export function App({ surface }: AppProps) {
           cancelAutoParse();
           sourceBlobRef.current = null;
           setSourceText("");
-          setNodes([]);
+          replaceNodes([]);
           setRootIds([]);
           setExpandedIds(new Set());
           setWorkerMatches([]);
@@ -943,4 +1014,15 @@ function getSourceSizeLabel(text: string, exactSize: boolean): string {
   }
 
   return formatBytes(new Blob([text]).size);
+}
+
+function shouldExpandNode(node: JsonNode, target: Exclude<ExpansionTarget, null>): boolean {
+  return target === "all" || node.depth < target;
+}
+
+function getSourceTabId(): number | undefined {
+  const value = new URLSearchParams(window.location.search).get("sourceTabId");
+  if (!value) return undefined;
+  const tabId = Number(value);
+  return Number.isInteger(tabId) && tabId > 0 ? tabId : undefined;
 }

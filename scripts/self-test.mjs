@@ -38,7 +38,7 @@ async function findBuiltWorker() {
   return join(assetsDir, workerFiles[0]);
 }
 
-async function createWorkerHarness() {
+async function createWorkerHarness({ forceStream = false } = {}) {
   const responses = [];
   const self = {
     postMessage(response) {
@@ -49,6 +49,7 @@ async function createWorkerHarness() {
     self,
     Blob,
     TextDecoder,
+    TextEncoder,
     Uint8Array,
     ArrayBuffer,
     Map,
@@ -61,19 +62,30 @@ async function createWorkerHarness() {
     Promise,
     String,
     Number,
-    Boolean
+    Boolean,
+    setTimeout
   });
 
-  vm.runInContext(await readFile(await findBuiltWorker(), "utf8"), context);
+  const workerSource = await readFile(await findBuiltWorker(), "utf8");
+  const executableSource = forceStream ? workerSource.replace("450*1024*1024", "0") : workerSource;
+  if (forceStream) assert(executableSource !== workerSource, "unable to force worker stream mode");
+  vm.runInContext(executableSource, context);
 
   async function request(message) {
     const start = responses.length;
     await self.onmessage({ data: message });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (message.type === "search") {
+      for (let attempt = 0; attempt < 10_000; attempt += 1) {
+        if (responses.slice(start).some((response) => response.type === "search" && response.requestId === message.requestId)) break;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     return responses.slice(start);
   }
 
-  return { request };
+  return { request, responses, dispatch: (message) => self.onmessage({ data: message }) };
 }
 
 function visibleNodes(rootIds, nodesById, expandedIds) {
@@ -173,6 +185,89 @@ await check("worker rejects trailing JSON content", async () => {
   const error = responses.find((item) => item.type === "error");
   assert(error, "invalid trailing content did not produce error");
   assert(String(error.message).includes("trailing"), "unexpected error message", String(error.message));
+});
+
+await check("iterative scanner preserves strict JSON validation", async () => {
+  const invalidSources = ["[1,]", '{"a":1,}', "[1 2]", '{"a" 1}', "[truefalse]"];
+  for (const [index, source] of invalidSources.entries()) {
+    const worker = await createWorkerHarness();
+    const responses = await worker.request({ type: "parse", text: source, requestId: 20 + index });
+    assert(responses.some((item) => item.type === "error"), "invalid JSON was accepted", source);
+  }
+});
+
+await check("a superseded blob parse cannot replace the active document", async () => {
+  const worker = await createWorkerHarness();
+  let resolveText;
+  const delayedBlob = {
+    size: 20,
+    text: () => new Promise((resolve) => {
+      resolveText = resolve;
+    })
+  };
+
+  const oldParse = worker.dispatch({ type: "parse", blob: delayedBlob, requestId: 10 });
+  await Promise.resolve();
+  await worker.dispatch({ type: "parse", text: '{"new":{"expected":1}}', requestId: 11 });
+  resolveText('{"old":{"wrong":1}}');
+  await oldParse;
+
+  const beforeExpand = worker.responses.length;
+  await worker.dispatch({
+    type: "expand",
+    requestId: 11,
+    expandRequestId: 1,
+    nodeId: 1,
+    valueStart: 7,
+    depth: 1
+  });
+  const expanded = worker.responses.slice(beforeExpand).find((item) => item.type === "expanded");
+  assert(expanded?.children.some((node) => node.key === "expected"), "old parse replaced the active worker source");
+});
+
+await check("a newer text search cancels an obsolete chunked search", async () => {
+  const worker = await createWorkerHarness();
+  const source = JSON.stringify(`needle-${"x".repeat(2_200_000)}`);
+  await worker.request({ type: "parse", text: source, requestId: 15 });
+  const responseStart = worker.responses.length;
+  void worker.dispatch({ type: "search", requestId: 15, query: "not-present", limit: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  void worker.dispatch({ type: "search", requestId: 15, query: "needle", limit: 10 });
+
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (worker.responses.slice(responseStart).some((item) => item.type === "search" && item.query === "needle")) break;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  const searchResponses = worker.responses.slice(responseStart).filter((item) => item.type === "search");
+  assert(searchResponses.some((item) => item.query === "needle" && item.matches.length === 1), "new search did not finish");
+  assert(!searchResponses.some((item) => item.query === "not-present"), "obsolete text search was not cancelled");
+});
+
+await check("stream search maps Unicode byte offsets to the correct node", async () => {
+  const worker = await createWorkerHarness({ forceStream: true });
+  for (const prefix of ["😀😀😀", "İ".repeat(20)]) {
+    await worker.request({ type: "parse", blob: new Blob([JSON.stringify([prefix, "target"])]), requestId: 12 });
+    const responses = await worker.request({ type: "search", requestId: 12, query: "target", limit: 10 });
+    const result = responses.find((item) => item.type === "search");
+    assert(result?.matches[0]?.nodeId === 2, "Unicode stream search selected the wrong node", JSON.stringify(result?.matches));
+  }
+});
+
+await check("worker accepts deeply nested valid JSON without overflowing the call stack", async () => {
+  const worker = await createWorkerHarness();
+  const source = `${"[".repeat(10_000)}0${"]".repeat(10_000)}`;
+  const responses = await worker.request({ type: "parse", text: source, requestId: 13 });
+  const result = responses.find((item) => item.type === "success" || item.type === "error");
+  assert(result?.type === "success", "deep valid JSON was rejected", result?.message);
+});
+
+await check("worker does not eagerly materialize a very wide root collection", async () => {
+  const worker = await createWorkerHarness();
+  const source = JSON.stringify(Array.from({ length: 5_000 }, (_, index) => index));
+  const responses = await worker.request({ type: "parse", text: source, requestId: 14 });
+  const result = responses.find((item) => item.type === "success");
+  assert(result?.nodes.length === 1, "wide root was eagerly materialized", String(result?.nodes.length));
+  assert(result?.nodes[0]?.childCount === 5_000, "wide root child count was lost");
 });
 
 await check("search navigation reveals target after expand changes visible rows", async () => {

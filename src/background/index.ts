@@ -6,8 +6,12 @@ chrome.runtime.onInstalled.addListener(() => {
   }
 });
 
-chrome.action.onClicked.addListener(() => {
+chrome.action.onClicked.addListener((tab) => {
+  const pageUrl = new URL(chrome.runtime.getURL("src/popup/index.html"));
+  if (tab.id !== undefined) {
+    pageUrl.searchParams.set("sourceTabId", String(tab.id));
+  }
   chrome.tabs.create({
-    url: chrome.runtime.getURL("src/popup/index.html")
+    url: pageUrl.toString()
   });
 });

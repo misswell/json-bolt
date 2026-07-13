@@ -3,16 +3,24 @@ import type { JsonNode, JsonNodeType, ParserRequest, ParserResponse } from "../c
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 const PREVIEW_LIMIT = 160;
 const STREAM_PARSE_THRESHOLD_BYTES = 450 * 1024 * 1024;
+const ROOT_AUTO_EXPAND_LIMIT = 2_000;
+const TEXT_SEARCH_CHUNK_CHARS = 1_000_000;
 
 let sourceText = "";
 let currentBlob: Blob | null = null;
 let nextNodeId = 0;
 let indexedNodes: JsonNode[] = [];
+let indexedNodesById = new Map<number, JsonNode>();
+let indexedNodePositionById = new Map<number, number>();
+let activeParseRequestId = 0;
+let searchGeneration = 0;
 
 ctx.onmessage = async (event: MessageEvent<ParserRequest>) => {
   const message = event.data;
 
   if (message.type === "parse") {
+    activeParseRequestId = message.requestId;
+    searchGeneration += 1;
     await handleParse(message);
     return;
   }
@@ -23,7 +31,9 @@ ctx.onmessage = async (event: MessageEvent<ParserRequest>) => {
   }
 
   if (message.type === "search") {
-    void handleSearch(message);
+    const generation = searchGeneration + 1;
+    searchGeneration = generation;
+    void handleSearch(message, generation);
   }
 };
 
@@ -37,10 +47,14 @@ async function handleParse(message: Extract<ParserRequest, { type: "parse" }>): 
       return;
     }
 
-    currentBlob = message.blob ?? null;
-    sourceText = message.blob ? await message.blob.text() : message.text ?? "";
+    const nextBlob = message.blob ?? null;
+    const nextSourceText = message.blob ? await message.blob.text() : message.text ?? "";
+    if (!isActiveParse(requestId)) return;
+
+    currentBlob = nextBlob;
+    sourceText = nextSourceText;
     nextNodeId = 0;
-    indexedNodes = [];
+    replaceIndexedNodes([]);
 
     const total = sourceText.length || 1;
     postResponse({ type: "progress", requestId, stage: "parsing", parsed: 0, total });
@@ -54,10 +68,10 @@ async function handleParse(message: Extract<ParserRequest, { type: "parse" }>): 
 
     postResponse({ type: "progress", requestId, stage: "building", parsed: Math.floor(total * 0.85), total });
 
-    if (root.childCount > 0 && root.valueStart !== undefined) {
+    if (root.childCount > 0 && root.childCount <= ROOT_AUTO_EXPAND_LIMIT && root.valueStart !== undefined) {
       const expanded = readChildren(root);
       root.children = expanded.childIds;
-      indexedNodes = [root, ...expanded.children];
+      replaceIndexedNodes([root, ...expanded.children]);
       postResponse({
         type: "success",
         requestId,
@@ -65,7 +79,7 @@ async function handleParse(message: Extract<ParserRequest, { type: "parse" }>): 
         rootIds: [root.id]
       });
     } else {
-      indexedNodes = [root];
+      replaceIndexedNodes([root]);
       postResponse({ type: "success", requestId, nodes: [root], rootIds: [root.id] });
     }
 
@@ -117,16 +131,18 @@ function handleExpand(message: Extract<ParserRequest, { type: "expand" }>): void
 }
 
 async function handleStreamParse(blob: Blob, requestId: number): Promise<void> {
+  if (!isActiveParse(requestId)) return;
   sourceText = "";
   currentBlob = blob;
   nextNodeId = 0;
-  indexedNodes = [];
+  replaceIndexedNodes([]);
 
   try {
     const scanner = new BlobScanner(blob, requestId);
     const rootStart = await scanner.skipWhitespace();
     const rootInfo = await scanner.skipValue(rootStart);
     const rootEnd = await scanner.skipWhitespace(rootInfo.end);
+    if (!isActiveParse(requestId)) return;
     if (rootEnd < blob.size) {
       throw new JsonScanError("Unexpected trailing content after JSON value", rootEnd);
     }
@@ -140,17 +156,20 @@ async function handleStreamParse(blob: Blob, requestId: number): Promise<void> {
     });
 
     const root = await createStreamNode(rootInfo, null, null, 0, blob);
-    if (root.childCount > 0) {
+    if (!isActiveParse(requestId)) return;
+    if (root.childCount > 0 && root.childCount <= ROOT_AUTO_EXPAND_LIMIT) {
       const expanded = await readStreamChildren(root, requestId);
+      if (!isActiveParse(requestId)) return;
       root.children = expanded.childIds;
-      indexedNodes = [root, ...expanded.children];
+      replaceIndexedNodes([root, ...expanded.children]);
       postResponse({ type: "success", requestId, nodes: indexedNodes, rootIds: [root.id] });
       return;
     }
 
-    indexedNodes = [root];
+    replaceIndexedNodes([root]);
     postResponse({ type: "success", requestId, nodes: [root], rootIds: [root.id] });
   } catch (error) {
+    if (error instanceof SupersededRequestError) return;
     postStreamError(error, requestId);
   }
 }
@@ -178,7 +197,10 @@ async function handleStreamExpand(message: Extract<ParserRequest, { type: "expan
   }
 }
 
-async function handleSearch(message: Extract<ParserRequest, { type: "search" }>): Promise<void> {
+async function handleSearch(
+  message: Extract<ParserRequest, { type: "search" }>,
+  generation: number
+): Promise<void> {
   const query = message.query.trim();
   if (!query) {
     postResponse({ type: "search", requestId: message.requestId, query: message.query, matches: [] });
@@ -186,21 +208,35 @@ async function handleSearch(message: Extract<ParserRequest, { type: "search" }>)
   }
 
   if (sourceText) {
+    const matches = await searchInText(
+      sourceText,
+      query,
+      message.limit,
+      () => !isActiveSearch(message, generation)
+    );
+    if (!isActiveSearch(message, generation)) return;
     postResponse({
       type: "search",
       requestId: message.requestId,
       query: message.query,
-      matches: searchInText(sourceText, query, message.limit)
+      matches
     });
     return;
   }
 
   if (currentBlob) {
+    const matches = await searchInBlob(
+      currentBlob,
+      query,
+      message.limit,
+      () => !isActiveSearch(message, generation)
+    );
+    if (!isActiveSearch(message, generation)) return;
     postResponse({
       type: "search",
       requestId: message.requestId,
       query: message.query,
-      matches: await searchInBlob(currentBlob, query, message.limit)
+      matches
     });
     return;
   }
@@ -312,51 +348,99 @@ function countChildren(start: number, type: JsonNodeType): number {
 }
 
 function skipValue(start: number): number {
-  const index = skipWhitespace(start);
+  let index = skipWhitespace(start);
+  const scalarEnd = skipScalarValue(index);
+  if (scalarEnd !== null) return scalarEnd;
+
+  const char = sourceText[index];
+  if (char !== "{" && char !== "[") throw new JsonScanError("Unexpected token", index);
+
+  const stack: TextScanFrame[] = [
+    char === "{"
+      ? { type: "object", state: "entryOrEnd" }
+      : { type: "array", state: "valueOrEnd" }
+  ];
+  index += 1;
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    index = skipWhitespace(index);
+    const current = sourceText[index];
+
+    if (frame.type === "object" && (frame.state === "entryOrEnd" || frame.state === "entry")) {
+      if (frame.state === "entryOrEnd" && current === "}") {
+        stack.pop();
+        index += 1;
+        continue;
+      }
+      if (current !== "\"") throw new JsonScanError("Expected object key", index);
+      index = skipString(index);
+      frame.state = "colon";
+      continue;
+    }
+
+    if (frame.type === "object" && frame.state === "colon") {
+      if (current !== ":") throw new JsonScanError("Expected ':' after object key", index);
+      index += 1;
+      frame.state = "value";
+      continue;
+    }
+
+    if (frame.type === "array" && frame.state === "valueOrEnd" && current === "]") {
+      stack.pop();
+      index += 1;
+      continue;
+    }
+
+    if (frame.state === "value" || frame.state === "valueOrEnd") {
+      const valueEnd = skipScalarValue(index);
+      frame.state = "commaOrEnd";
+      if (valueEnd !== null) {
+        index = valueEnd;
+        continue;
+      }
+      if (current === "{") {
+        stack.push({ type: "object", state: "entryOrEnd" });
+        index += 1;
+        continue;
+      }
+      if (current === "[") {
+        stack.push({ type: "array", state: "valueOrEnd" });
+        index += 1;
+        continue;
+      }
+      throw new JsonScanError("Unexpected token", index);
+    }
+
+    if (frame.state === "commaOrEnd") {
+      const close = frame.type === "object" ? "}" : "]";
+      if (current === close) {
+        stack.pop();
+        index += 1;
+        continue;
+      }
+      if (current !== ",") throw new JsonScanError(`Expected ',' or '${close}'`, index);
+      frame.state = frame.type === "object" ? "entry" : "value";
+      index += 1;
+    }
+  }
+
+  return index;
+}
+
+type TextScanFrame =
+  | { type: "object"; state: "entryOrEnd" | "entry" | "colon" | "value" | "commaOrEnd" }
+  | { type: "array"; state: "valueOrEnd" | "value" | "commaOrEnd" };
+
+function skipScalarValue(index: number): number | null {
   const char = sourceText[index];
 
   if (char === "\"") return skipString(index);
-  if (char === "{") return skipObjectValue(index);
-  if (char === "[") return skipArrayValue(index);
   if (char === "t" && sourceText.startsWith("true", index)) return index + 4;
   if (char === "f" && sourceText.startsWith("false", index)) return index + 5;
   if (char === "n" && sourceText.startsWith("null", index)) return index + 4;
   if (char === "-" || isDigit(char)) return skipNumber(index);
-
-  throw new JsonScanError("Unexpected token", index);
-}
-
-function skipObjectValue(start: number): number {
-  let index = skipWhitespace(start + 1);
-  if (sourceText[index] === "}") return index + 1;
-
-  while (index < sourceText.length) {
-    if (sourceText[index] !== "\"") throw new JsonScanError("Expected object key", index);
-    index = skipWhitespace(skipString(index));
-    if (sourceText[index] !== ":") throw new JsonScanError("Expected ':' after object key", index);
-    index = skipWhitespace(skipValue(index + 1));
-
-    if (sourceText[index] === "}") return index + 1;
-    if (sourceText[index] !== ",") throw new JsonScanError("Expected ',' or '}'", index);
-    index = skipWhitespace(index + 1);
-  }
-
-  throw new JsonScanError("Unterminated object", start);
-}
-
-function skipArrayValue(start: number): number {
-  let index = skipWhitespace(start + 1);
-  if (sourceText[index] === "]") return index + 1;
-
-  while (index < sourceText.length) {
-    index = skipWhitespace(skipValue(index));
-
-    if (sourceText[index] === "]") return index + 1;
-    if (sourceText[index] !== ",") throw new JsonScanError("Expected ',' or ']'", index);
-    index = skipWhitespace(index + 1);
-  }
-
-  throw new JsonScanError("Unterminated array", start);
+  return null;
 }
 
 function skipString(start: number): number {
@@ -475,45 +559,30 @@ function safeJsonParse<T>(text: string, fallback: T): string | T {
   }
 }
 
-function searchInText(text: string, query: string, limit: number): { nodeId: number }[] {
-  const normalizedText = text.toLocaleLowerCase();
+async function searchInText(
+  text: string,
+  query: string,
+  limit: number,
+  isCancelled: () => boolean
+): Promise<{ nodeId: number }[]> {
   const normalizedQuery = query.toLocaleLowerCase();
   const results: { nodeId: number }[] = [];
   const seen = new Set<number>();
-  let index = normalizedText.indexOf(normalizedQuery);
-
-  while (index >= 0 && results.length < limit) {
-    const node = findDeepestIndexedNode(index);
-    if (node && !seen.has(node.id)) {
-      seen.add(node.id);
-      results.push({ nodeId: node.id });
-    }
-    index = normalizedText.indexOf(normalizedQuery, index + Math.max(1, normalizedQuery.length));
-  }
-
-  return results;
-}
-
-async function searchInBlob(blob: Blob, query: string, limit: number): Promise<{ nodeId: number }[]> {
-  const normalizedQuery = query.toLocaleLowerCase();
-  const decoder = new TextDecoder();
-  const reader = blob.stream().getReader();
-  const results: { nodeId: number }[] = [];
-  const seen = new Set<number>();
-  let scanned = 0;
+  const carryCodePoints = Math.max(Array.from(normalizedQuery).length - 1, 0);
+  let offset = 0;
   let carry = "";
-  let done = false;
 
-  while (!done && results.length < limit) {
-    const next = await reader.read();
-    done = next.done;
-    const chunk = next.value ? decoder.decode(next.value, { stream: !done }) : "";
-    const text = `${carry}${chunk}`;
-    const normalizedText = text.toLocaleLowerCase();
+  while (offset < text.length && results.length < limit) {
+    if (isCancelled()) return [];
+    const chunk = text.slice(offset, offset + TEXT_SEARCH_CHUNK_CHARS);
+    const combined = `${carry}${chunk}`;
+    const normalized = normalizeWithOriginalIndices(combined);
+    const normalizedText = normalized.text;
     let index = normalizedText.indexOf(normalizedQuery);
 
     while (index >= 0 && results.length < limit) {
-      const position = Math.max(0, scanned - carry.length + index);
+      const originalIndex = normalized.originalIndices[index];
+      const position = Math.max(0, offset - carry.length + originalIndex);
       const node = findDeepestIndexedNode(position);
       if (node && !seen.has(node.id)) {
         seen.add(node.id);
@@ -522,33 +591,158 @@ async function searchInBlob(blob: Blob, query: string, limit: number): Promise<{
       index = normalizedText.indexOf(normalizedQuery, index + Math.max(1, normalizedQuery.length));
     }
 
-    scanned += chunk.length;
-    carry = text.slice(-Math.max(normalizedQuery.length - 1, 0));
+    offset += chunk.length;
+    carry = carryCodePoints === 0 ? "" : Array.from(combined).slice(-carryCodePoints).join("");
+    if (offset < text.length) await yieldToWorkerEventLoop();
   }
 
   return results;
 }
 
-function findDeepestIndexedNode(position: number): JsonNode | null {
-  let best: JsonNode | null = null;
+async function searchInBlob(
+  blob: Blob,
+  query: string,
+  limit: number,
+  isCancelled: () => boolean
+): Promise<{ nodeId: number }[]> {
+  const normalizedQuery = query.toLocaleLowerCase();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const reader = blob.stream().getReader();
+  const results: { nodeId: number }[] = [];
+  const seen = new Set<number>();
+  let scannedBytes = 0;
+  let carry = "";
+  let carryBytes = 0;
+  let done = false;
 
-  for (const node of indexedNodes) {
-    if (node.valueStart === undefined || node.valueEnd === undefined) continue;
-    if (position < node.valueStart || position >= node.valueEnd) continue;
-    if (!best || node.depth > best.depth) {
-      best = node;
+  while (!done && results.length < limit) {
+    if (isCancelled()) {
+      await reader.cancel();
+      return [];
+    }
+    const next = await reader.read();
+    done = next.done;
+    const chunk = next.value ? decoder.decode(next.value, { stream: !done }) : "";
+    const text = `${carry}${chunk}`;
+    const normalized = normalizeWithOriginalIndices(text);
+    const normalizedText = normalized.text;
+    let index = normalizedText.indexOf(normalizedQuery);
+
+    while (index >= 0 && results.length < limit) {
+      const originalIndex = normalized.originalIndices[index];
+      const position = Math.max(0, scannedBytes - carryBytes + encoder.encode(text.slice(0, originalIndex)).byteLength);
+      const node = findDeepestIndexedNode(position);
+      if (node && !seen.has(node.id)) {
+        seen.add(node.id);
+        results.push({ nodeId: node.id });
+      }
+      index = normalizedText.indexOf(normalizedQuery, index + Math.max(1, normalizedQuery.length));
+    }
+
+    scannedBytes += next.value?.byteLength ?? 0;
+    const carryCodePoints = Math.max(Array.from(normalizedQuery).length - 1, 0);
+    carry = carryCodePoints === 0 ? "" : Array.from(text).slice(-carryCodePoints).join("");
+    carryBytes = encoder.encode(carry).byteLength;
+  }
+
+  return results;
+}
+
+function normalizeWithOriginalIndices(text: string): { text: string; originalIndices: Uint32Array } {
+  const normalizedText = text.toLocaleLowerCase();
+  const originalIndices = new Uint32Array(normalizedText.length + 1);
+  let originalIndex = 0;
+  let normalizedIndex = 0;
+  for (const originalCharacter of text) {
+    const normalizedCharacter = originalCharacter.toLocaleLowerCase();
+    for (let offset = 0; offset < normalizedCharacter.length && normalizedIndex + offset < originalIndices.length; offset += 1) {
+      originalIndices[normalizedIndex + offset] = originalIndex;
+    }
+    originalIndex += originalCharacter.length;
+    normalizedIndex += normalizedCharacter.length;
+    originalIndices[Math.min(normalizedIndex, normalizedText.length)] = originalIndex;
+  }
+
+  return { text: normalizedText, originalIndices };
+}
+
+function yieldToWorkerEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function findDeepestIndexedNode(position: number): JsonNode | null {
+  let low = 0;
+  let high = indexedNodes.length - 1;
+  let candidateIndex = -1;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const start = indexedNodes[middle].valueStart ?? Number.POSITIVE_INFINITY;
+    if (start <= position) {
+      candidateIndex = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
     }
   }
 
-  return best;
+  let candidate = candidateIndex >= 0 ? indexedNodes[candidateIndex] : undefined;
+  while (candidate) {
+    if (candidate.valueStart !== undefined && candidate.valueEnd !== undefined && position < candidate.valueEnd) {
+      return candidate;
+    }
+    candidate = candidate.parentId === null ? undefined : indexedNodesById.get(candidate.parentId);
+  }
+
+  return null;
 }
 
 function mergeIndexedNodes(nodes: JsonNode[]): void {
-  const byId = new Map(indexedNodes.map((node) => [node.id, node]));
+  const additions: JsonNode[] = [];
   for (const node of nodes) {
-    byId.set(node.id, node);
+    const position = indexedNodePositionById.get(node.id);
+    indexedNodesById.set(node.id, node);
+    if (position === undefined) {
+      additions.push(node);
+    } else {
+      indexedNodes[position] = node;
+    }
   }
-  indexedNodes = Array.from(byId.values());
+  if (additions.length === 0) return;
+
+  additions.sort(compareNodesByStart);
+  const merged: JsonNode[] = [];
+  let existingIndex = 0;
+  let additionIndex = 0;
+  while (existingIndex < indexedNodes.length || additionIndex < additions.length) {
+    const existing = indexedNodes[existingIndex];
+    const addition = additions[additionIndex];
+    if (addition === undefined || (existing !== undefined && compareNodesByStart(existing, addition) <= 0)) {
+      merged.push(existing);
+      existingIndex += 1;
+    } else {
+      merged.push(addition);
+      additionIndex += 1;
+    }
+  }
+  indexedNodes = merged;
+  rebuildIndexedNodePositions();
+}
+
+function replaceIndexedNodes(nodes: JsonNode[]): void {
+  indexedNodes = nodes.slice().sort(compareNodesByStart);
+  indexedNodesById = new Map(indexedNodes.map((node) => [node.id, node]));
+  rebuildIndexedNodePositions();
+}
+
+function compareNodesByStart(left: JsonNode, right: JsonNode): number {
+  const byStart = (left.valueStart ?? Number.POSITIVE_INFINITY) - (right.valueStart ?? Number.POSITIVE_INFINITY);
+  return byStart !== 0 ? byStart : left.depth - right.depth;
+}
+
+function rebuildIndexedNodePositions(): void {
+  indexedNodePositionById = new Map(indexedNodes.map((node, index) => [node.id, index]));
 }
 
 interface StreamValueInfo {
@@ -715,6 +909,7 @@ class BlobScanner {
   }
 
   async byteAt(globalOffset: number): Promise<number | undefined> {
+    if (!isActiveParse(this.requestId)) throw new SupersededRequestError();
     if (globalOffset < this.baseOffset || globalOffset >= this.globalEnd) return undefined;
     await this.ensure(globalOffset);
     const local = globalOffset - this.bufferStart;
@@ -898,6 +1093,19 @@ class BlobScanner {
       total: this.globalEnd
     });
   }
+}
+
+class SupersededRequestError extends Error {}
+
+function isActiveParse(requestId: number): boolean {
+  return requestId === activeParseRequestId;
+}
+
+function isActiveSearch(
+  message: Extract<ParserRequest, { type: "search" }>,
+  generation: number
+): boolean {
+  return message.requestId === activeParseRequestId && generation === searchGeneration;
 }
 
 function isDigitByte(value: number | undefined): boolean {

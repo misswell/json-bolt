@@ -65,6 +65,8 @@ For normal text and medium JSON files, JsonBolt parses text in a Worker. For ver
 
 This keeps the page responsive for multi-hundred-MB and GB-scale files. Extremely large files can still take time to fully validate because strict JSON validation must scan the full input.
 
+Blob-backed dropped files retain only a small editable preview in the page. Copy still uses the complete original file, while format and minify are disabled so they never operate on truncated preview data.
+
 ## Utility: Split A Huge JSON Array
 
 For performance testing, the repository includes a helper that splits a top-level JSON array into valid smaller JSON array files without cutting through objects:
