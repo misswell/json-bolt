@@ -17,12 +17,15 @@ const MAX_CONCURRENT_EXPANSION_REQUESTS = 1;
 const MIN_EXPANSION_PROGRESS_MS = 450;
 const EXPANSION_NOTICE_DELAY_MS = 200;
 const MAX_UTF16_NODE_COPY_CHARS = 16 * 1024 * 1024;
+const MAX_SOURCE_HISTORY_ENTRIES = 10;
+const LARGE_SOURCE_HISTORY_ENTRIES = 1;
 
 interface AppProps {
   surface: "page" | "sidepanel";
 }
 
 type ExpansionTarget = number | "all" | null;
+type SourceReplacement = { before: string; after: string };
 
 export function App({ surface }: AppProps) {
   const labels = useMemo(() => getMessages(), []);
@@ -51,6 +54,8 @@ export function App({ surface }: AppProps) {
   const expandLevelRef = useRef(DEFAULT_EXPAND_LEVEL);
   const nodeIndexByIdRef = useRef<Map<number, number>>(new Map());
   const nodeIdByIdentityRef = useRef<Map<string, number>>(new Map());
+  const sourceUndoStackRef = useRef<SourceReplacement[]>([]);
+  const sourceRedoStackRef = useRef<SourceReplacement[]>([]);
   const [sourceInfo, setSourceInfo] = useState({
     hasText: INITIAL_SOURCE.length > 0,
     sizeLabel: formatBytes(new Blob([INITIAL_SOURCE]).size)
@@ -239,6 +244,19 @@ export function App({ surface }: AppProps) {
   useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
       const modifier = event.metaKey || event.ctrlKey;
+      const isSourceEditor = event.target === inputRef.current;
+      const key = event.key.toLocaleLowerCase();
+      if (modifier && isSourceEditor && key === "z") {
+        const handled = event.shiftKey ? redoSourceReplacement() : undoSourceReplacement();
+        if (handled) event.preventDefault();
+        return;
+      }
+
+      if (modifier && isSourceEditor && key === "y") {
+        if (redoSourceReplacement()) event.preventDefault();
+        return;
+      }
+
       if (modifier && event.key === "Enter") {
         event.preventDefault();
         parseCurrentSource();
@@ -602,9 +620,69 @@ export function App({ surface }: AppProps) {
     setCopyingNodeId(null);
   }
 
-  function replaceSourceAndParse(text: string, nextNotice?: string | null) {
+  function recordSourceReplacement(after: string) {
+    if (sourceBlobRef.current) {
+      clearSourceHistory();
+      return;
+    }
+    const before = getSource();
+    if (before === after) return;
+    sourceUndoStackRef.current.push({ before, after });
+    const historyLimit =
+      before.length + after.length > LARGE_SOURCE_CHARS ? LARGE_SOURCE_HISTORY_ENTRIES : MAX_SOURCE_HISTORY_ENTRIES;
+    while (sourceUndoStackRef.current.length > historyLimit) {
+      sourceUndoStackRef.current.shift();
+    }
+    sourceRedoStackRef.current = [];
+  }
+
+  function undoSourceReplacement(): boolean {
+    const replacement = sourceUndoStackRef.current[sourceUndoStackRef.current.length - 1];
+    if (!replacement || getSource() !== replacement.after) return false;
+    sourceUndoStackRef.current.pop();
+    sourceRedoStackRef.current.push(replacement);
+    restoreSourceFromHistory(replacement.before);
+    return true;
+  }
+
+  function redoSourceReplacement(): boolean {
+    const replacement = sourceRedoStackRef.current[sourceRedoStackRef.current.length - 1];
+    if (!replacement || getSource() !== replacement.before) return false;
+    sourceRedoStackRef.current.pop();
+    sourceUndoStackRef.current.push(replacement);
+    restoreSourceFromHistory(replacement.after);
+    return true;
+  }
+
+  function restoreSourceFromHistory(text: string) {
     cancelAutoParse();
     setSourceText(text);
+    setError(null);
+    setNotice(null);
+    if (text) {
+      window.setTimeout(() => parseSource(text), 0);
+      return;
+    }
+    latestRequestIdRef.current += 1;
+    setIsParsing(false);
+    setProgress(0);
+    replaceNodes([]);
+    setRootIds([]);
+    setExpandedIds(new Set());
+    setWorkerMatches([]);
+    cancelExpansionWork();
+  }
+
+  function clearSourceHistory() {
+    sourceUndoStackRef.current = [];
+    sourceRedoStackRef.current = [];
+  }
+
+  function replaceSourceAndParse(text: string, nextNotice?: string | null) {
+    cancelAutoParse();
+    recordSourceReplacement(text);
+    setSourceText(text);
+    inputRef.current?.focus();
     setError(null);
     setNotice(nextNotice ?? (text.length > TEXTAREA_PREVIEW_MAX_CHARS ? labels.largeInputPreview : null));
     window.setTimeout(() => parseSource(text), 0);
@@ -628,6 +706,7 @@ export function App({ surface }: AppProps) {
     try {
       cancelAutoParse();
       const preview = await file.slice(0, TEXTAREA_PREVIEW_MAX_CHARS).text();
+      clearSourceHistory();
       setSourceFile(file, preview);
       replaceNodes([]);
       setRootIds([]);
@@ -981,6 +1060,7 @@ export function App({ surface }: AppProps) {
         onClear={() => {
           cancelAutoParse();
           sourceBlobRef.current = null;
+          clearSourceHistory();
           setSourceText("");
           replaceNodes([]);
           cancelNodeCopy();
@@ -1007,6 +1087,7 @@ export function App({ surface }: AppProps) {
           defaultValue={INITIAL_SOURCE}
           onInput={(event) => {
             const text = event.currentTarget.value;
+            sourceRedoStackRef.current = [];
             sourceTextRef.current = text;
             if (isPreviewMode) {
               setIsPreviewMode(false);
