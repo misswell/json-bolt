@@ -45,6 +45,7 @@ export function App({ surface }: AppProps) {
   const dragDepthRef = useRef(0);
   const sourceTabIdRef = useRef(surface === "page" ? getSourceTabId() : undefined);
   const expandLevelSelectedRef = useRef(false);
+  const expandLevelRef = useRef(DEFAULT_EXPAND_LEVEL);
   const nodeIndexByIdRef = useRef<Map<number, number>>(new Map());
   const nodeIdByIdentityRef = useRef<Map<string, number>>(new Map());
   const [sourceInfo, setSourceInfo] = useState({
@@ -176,6 +177,10 @@ export function App({ surface }: AppProps) {
       setWorkerMatches([]);
       setProgress(0);
       setActiveMatchIndex(0);
+      if (response.nodes.some((node) => node.childCount > 0)) {
+        startExpansionRun();
+        setPendingExpandLevel(expandLevelRef.current);
+      }
     };
 
     return () => {
@@ -195,7 +200,10 @@ export function App({ surface }: AppProps) {
   useEffect(() => {
     let active = true;
     void loadExpandLevel().then((level) => {
-      if (active && !expandLevelSelectedRef.current) setExpandLevel(level);
+      if (active && !expandLevelSelectedRef.current) {
+        expandLevelRef.current = level;
+        setExpandLevel(level);
+      }
     });
     return () => {
       active = false;
@@ -692,6 +700,7 @@ export function App({ surface }: AppProps) {
 
   const expandToLevel = (level: number) => {
     const normalized = normalizeExpandLevel(level);
+    expandLevelRef.current = normalized;
     const runId = startExpansionRun();
     setExpandLevel(normalized);
     setPendingExpandLevel(normalized);
